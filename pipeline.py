@@ -54,16 +54,16 @@ class JobHunterPipeline:
     def __init__(
         self,
         use_telegram: bool = False,
+        use_mock: bool = False,
     ):
-        # Module 1: Job Scraper (Greenhouse + RSS, both free; mock fallback)
+        # Module 1: Job Scraper (JSearch — searches ALL companies by
+        # keyword, no pre-configured company list; mock data via --mock)
         self.scraper = JobScraper(
             keywords=config.JOB_KEYWORDS,
-            locations=config.TARGET_LOCATIONS,
-            greenhouse_slugs=config.GREENHOUSE_COMPANY_SLUGS,
-            rss_feed_urls=config.RSS_FEED_URLS,
+            use_mock=use_mock,
         )
 
-        # Module 2: Contact Finder (known_connections.json + Apollo free tier)
+        # Module 2: Contact Finder (LinkedIn Connections.csv + Apollo, called per-company)
         self.finder = ContactFinder()
 
         # Module 3: Message Templater (hardcoded template, no LLM)

@@ -7,11 +7,13 @@ Run modes:
     python main.py --daily            → Run once per day at 08:00
     python main.py --daily --hour 9   → Run once per day at 09:00
     python main.py --telegram         → Enable Telegram notifications
+    python main.py --mock             → Use hardcoded mock jobs instead of JSearch
 
 Set API keys via a local .env file (see .env.example):
     TELEGRAM_BOT_TOKEN=...
     TELEGRAM_CHAT_ID=...
-    APOLLO_API_KEY=...   (optional)
+    RAPIDAPI_KEY=...      (JSearch — job search)
+    APOLLO_API_KEY=...    (optional — Priority C/D auto-discovery)
 """
 
 import argparse
@@ -71,6 +73,10 @@ def main():
         help="Enable Telegram notifications",
     )
     parser.add_argument(
+        "--mock", action="store_true",
+        help="Use hardcoded mock jobs instead of calling JSearch (offline testing)",
+    )
+    parser.add_argument(
         "-v", "--verbose", action="store_true",
         help="Enable debug logging",
     )
@@ -88,7 +94,9 @@ def main():
     for warning in config.check_keys():
         logger.warning("⚠️  %s", warning)
 
-    pipeline = JobHunterPipeline(use_telegram=args.telegram)
+    if args.mock:
+        logger.info("🧪 --mock enabled: using hardcoded sample jobs instead of JSearch.")
+    pipeline = JobHunterPipeline(use_telegram=args.telegram, use_mock=args.mock)
 
     if args.daily:
         pipeline.run_daily(run_at_hour=args.hour)

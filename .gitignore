@@ -10,8 +10,11 @@ __pycache__/
 # kept local-only per earlier request; config.example.py is the committed template.
 config.py
 
-# Manual contacts list — contains real people's names/LinkedIn URLs
+# Real people's data — never commit
 known_connections.json
+Connections.csv
 
 # Runtime-generated data
 outreach_log.jsonl
+seen_jobs.json
+api_usage.json

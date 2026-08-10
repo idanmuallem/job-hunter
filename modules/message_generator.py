@@ -56,7 +56,7 @@ class MessageGenerator:
         message = MESSAGE_TEMPLATE.format(
             first_name=first_name,
             sender_name=config.PROFILE["name"],
-            sender_degree=config.PROFILE["degree_short"],
+            sender_degree=config.PROFILE["degree"],
         )
         message = self._enforce_char_limit(message)
 

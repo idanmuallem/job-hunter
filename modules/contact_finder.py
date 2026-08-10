@@ -2,34 +2,57 @@
 Module 2: The Finder Logic (Target Prioritization)
 Finds people to contact at a target company from two free sources and
 ranks them by a strict priority hierarchy:
-  A) 1st-degree connections     — known_connections.json (manual, free)
-  B) Alumni (BGU / McGill)      — known_connections.json (manual, free)
-  C) Engineering Managers/Leads — Apollo.io free tier (auto-discovered)
-  D) HR / Technical Recruiters  — Apollo.io free tier (auto-discovered)
+  A) 1st-degree connections — your LinkedIn Connections.csv export (free)
+  B) University alumni      — not available from the CSV (no university
+                               column); kept in the enum for future use
+  C) Engineering Managers/Leads — Apollo.io (auto-discovered per company)
+  D) HR / Technical Recruiters  — Apollo.io (auto-discovered per company)
 
 We never scrape or log into LinkedIn — that violates its Terms of
-Service. known_connections.json is the intended, ToS-compliant way to
-capture your own network; Apollo's free tier only ever discloses
-name/title/company/LinkedIn URL (revealing emails/phone is what costs
-credits, and this project never does that).
+Service. The Connections.csv export is LinkedIn's own officially
+provided data export, which is the ToS-compliant way to get your 1st-
+degree network. Apollo is called per-company as jobs are discovered —
+there is no pre-configured company list.
+
+NOTE: as of this writing, Apollo's search endpoints return
+"API_INACCESSIBLE" on a true Free plan (API access requires a paid
+plan) — see _search_apollo(). The integration is implemented so it
+starts working automatically the moment the key gains API access;
+until then, Priority C/D will simply come back empty.
 """
 
 from __future__ import annotations
 
-import json
+import csv
 import logging
+import re
 from dataclasses import dataclass
 from enum import IntEnum
+from pathlib import Path
 from typing import Optional
 
 import requests
 
 import config
+from modules import usage_tracker
 
 logger = logging.getLogger(__name__)
 
-APOLLO_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/search"
+# Current Apollo endpoints per official docs (docs.apollo.io), verified
+# live against the project's own API key:
+#   - "organization_top_people" does NOT exist (confirmed: HTTP 404).
+#   - These two endpoints exist and are correctly named, but return
+#     HTTP 403 {"error_code": "API_INACCESSIBLE"} on a Free plan — API
+#     access itself requires a paid plan. See _flag_if_plan_inaccessible().
+APOLLO_ORG_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_companies/search"
+APOLLO_PEOPLE_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/api_search"
 REQUEST_TIMEOUT = 10
+
+_COMPANY_SUFFIXES = (
+    " incorporated", " inc.", " inc", " ltd.", " ltd", " llc.", " llc",
+    " corp.", " corp", " co.", " co", " gmbh", " s.a.", " plc",
+)
+_NON_ALNUM_RE = re.compile(r"[^\w\s]")
 
 
 class Priority(IntEnum):
@@ -51,7 +74,7 @@ class Contact:
     is_first_degree: bool = False
     university: str = ""
     department: str = ""
-    source: str = "known_connections"
+    source: str = "linkedin_csv"
 
     @property
     def priority(self) -> Priority:
@@ -85,15 +108,17 @@ class Contact:
 class ContactFinder:
     """
     Finds and ranks contacts at a target company by merging:
-      1. known_connections.json (manual, free — Priority A/B)
-      2. Apollo.io free-tier search (auto, free — Priority C/D)
-    Works with just #1 if Apollo isn't configured; never fabricates
-    placeholder people if nothing is found.
+      1. Your LinkedIn Connections.csv export (free, manual — Priority A)
+      2. Apollo.io auto-discovery, called per-company (free tier — Priority C/D)
+    Works with just #1 if Apollo isn't configured/accessible; never
+    fabricates placeholder people.
     """
 
     def __init__(self):
-        self._cache: dict[str, list[Contact]] = {}
-        self._known_connections = self._load_known_connections()
+        self._connections = self._load_linkedin_connections()
+        # Set True after the first hard Apollo failure (e.g. plan doesn't
+        # include API access) so we stop retrying a dead key mid-run.
+        self._apollo_unavailable = False
 
     def find_best_contact(self, company: str) -> Optional[Contact]:
         """Convenience wrapper — returns the single top contact."""
@@ -103,15 +128,11 @@ class ContactFinder:
     def find_top_contacts(self, company: str, n: int = 3) -> list[Contact]:
         """
         Search for people at `company` and return up to `n` contacts,
-        ranked by the priority hierarchy (A → B → C → D).
-        Returns an empty list if nobody relevant is found — never
-        fabricates placeholder contacts.
+        ranked by the priority hierarchy (A → B → C → D). Returns an
+        empty list if nobody relevant is found — never fabricates
+        placeholder contacts.
         """
-        key = company.lower().strip()
-        if key not in self._cache:
-            self._cache[key] = self._gather_contacts(company)
-        contacts = self._cache[key]
-
+        contacts = self._gather_contacts(company)
         ranked = [c for c in contacts if c.priority != Priority.NONE]
         if not ranked:
             logger.warning("No prioritized contacts found at %s", company)
@@ -130,11 +151,11 @@ class ContactFinder:
     # ── Source Aggregation ───────────────────────────────────────
 
     def _gather_contacts(self, company: str) -> list[Contact]:
-        """Merge known connections and Apollo results, de-duplicated by name."""
+        """Merge LinkedIn CSV matches and Apollo results, de-duplicated by name."""
         contacts: list[Contact] = []
         seen_names: set[str] = set()
 
-        for contact in self._get_known_contacts(company):
+        for contact in self._match_linkedin_connections(company):
             if contact.name.lower() not in seen_names:
                 contacts.append(contact)
                 seen_names.add(contact.name.lower())
@@ -146,99 +167,162 @@ class ContactFinder:
 
         return contacts
 
-    # ── Source 1: known_connections.json (manual, free) ──────────
+    # ── Source 1: LinkedIn Connections.csv (manual export, free) ─
 
-    def _get_known_contacts(self, company: str) -> list[Contact]:
-        key = company.lower().strip()
-        entries = []
-        for db_key, people in self._known_connections.items():
-            if db_key in key or key in db_key:
-                entries = people
-                break
+    def _match_linkedin_connections(self, company: str) -> list[Contact]:
+        matches = []
+        for row in self._connections:
+            row_company = (row.get("Company") or "").strip()
+            if not row_company or not _companies_match(row_company, company):
+                continue
 
-        return [
-            Contact(
-                name=e["name"],
-                role=e.get("role", ""),
-                company=company,
-                linkedin_url=e.get("linkedin_url", ""),
-                is_first_degree=e.get("is_first_degree", False),
-                university=e.get("university", ""),
-                department=e.get("department", ""),
-                source="known_connections",
+            name = " ".join(
+                part.strip() for part in
+                (row.get("First Name", ""), row.get("Last Name", ""))
+                if part.strip()
             )
-            for e in entries
-        ]
+            if not name:
+                continue
+
+            matches.append(Contact(
+                name=name,
+                role=(row.get("Position") or "").strip(),
+                company=company,
+                linkedin_url=(row.get("URL") or "").strip(),
+                is_first_degree=True,  # the CSV only ever contains 1st-degree connections
+                university="",
+                department="",
+                source="linkedin_csv",
+            ))
+        return matches
 
     @staticmethod
-    def _load_known_connections() -> dict[str, list[dict]]:
-        """Load the user's manual connections file. Missing file → empty dict."""
-        path = config.KNOWN_CONNECTIONS_FILE
+    def _load_linkedin_connections() -> list[dict]:
+        """
+        Load and parse the user's LinkedIn Connections.csv export.
+        LinkedIn prefixes the file with a few note lines before the real
+        header row, so we scan for the line containing "First Name" first.
+        Missing/malformed file → empty list, never crashes the pipeline.
+        """
+        path = Path(config.LINKEDIN_CSV_PATH)
         if not path.exists():
             logger.warning(
-                "%s not found — Priority A/B contacts unavailable. "
-                "Copy known_connections.example.json to get started.",
+                "%s not found — Priority A contacts unavailable. Export your "
+                "connections from LinkedIn (Settings & Privacy → Data "
+                "privacy → Get a copy of your data → Connections).",
                 path.name,
             )
-            return {}
-
-        try:
-            with open(path, "r", encoding="utf-8") as f:
-                data = json.load(f)
-        except (json.JSONDecodeError, OSError) as e:
-            logger.error("Failed to load %s: %s", path.name, e)
-            return {}
-
-        # Keys starting with "_" (e.g. "_readme") are documentation, not companies.
-        return {k: v for k, v in data.items() if not k.startswith("_")}
-
-    # ── Source 2: Apollo.io free tier (auto-discovery, free) ─────
-
-    @staticmethod
-    def _search_apollo(company: str) -> list[Contact]:
-        """
-        Search Apollo's free tier for engineering leads and recruiters at
-        `company`. Returns [] on any failure — must never crash the pipeline.
-        """
-        if not config.APOLLO_API_KEY:
             return []
 
-        titles = ["Engineering Manager", "Tech Lead", "Technical Recruiter", "Talent Acquisition"]
+        try:
+            with open(path, "r", encoding="utf-8-sig", newline="") as f:
+                lines = f.readlines()
+        except OSError as e:
+            logger.error("Failed to read %s: %s", path.name, e)
+            return []
+
+        header_idx = next(
+            (i for i, line in enumerate(lines) if "First Name" in line), None
+        )
+        if header_idx is None:
+            logger.error(
+                "%s doesn't look like a LinkedIn connections export — no "
+                "'First Name' header row found.", path.name,
+            )
+            return []
+
+        rows = list(csv.DictReader(lines[header_idx:]))
+        if not rows:
+            logger.warning("%s has a header row but no connections listed.", path.name)
+        else:
+            logger.info("Loaded %d LinkedIn connection(s) from %s", len(rows), path.name)
+        return rows
+
+    # ── Source 2: Apollo.io (auto-discovery per company, free tier) ─
+
+    def _search_apollo(self, company: str) -> list[Contact]:
+        """
+        Discover engineering leads / recruiters at `company` via Apollo.
+        Returns [] on any failure — must never crash the pipeline.
+        """
+        if not config.APOLLO_API_KEY or self._apollo_unavailable:
+            return []
+
+        org_id = self._apollo_lookup_organization_id(company)
+        if org_id is None:
+            return []
+        return self._apollo_people_search(company, org_id)
+
+    def _apollo_lookup_organization_id(self, company: str) -> Optional[str]:
+        """Resolve a company name to an Apollo organization id (required by people search)."""
+        if not usage_tracker.can_call_apollo():
+            self._apollo_unavailable = True
+            return None
+        usage_tracker.record_apollo_call()
+
+        headers = {"x-api-key": config.APOLLO_API_KEY, "Content-Type": "application/json"}
+        payload = {"q_organization_name": company, "page": 1, "per_page": 1}
+        try:
+            resp = requests.post(
+                APOLLO_ORG_SEARCH_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT,
+            )
+            data = resp.json()
+        except (requests.exceptions.RequestException, ValueError) as e:
+            logger.warning("Apollo organization search failed for '%s': %s", company, e)
+            return None
+
+        if self._flag_if_plan_inaccessible(data):
+            return None
+        if "error" in data:
+            logger.warning("Apollo organization search error for '%s': %s", company, data["error"])
+            return None
+
+        orgs = data.get("organizations") or data.get("accounts") or []
+        return orgs[0].get("id") if orgs else None
+
+    def _apollo_people_search(self, company: str, org_id: str) -> list[Contact]:
+        """Search for engineering/HR people at a resolved Apollo organization id."""
+        if not usage_tracker.can_call_apollo():
+            self._apollo_unavailable = True
+            return []
+        usage_tracker.record_apollo_call()
+
+        titles = config.ENGINEERING_TITLES + config.HR_TITLES
+        headers = {"x-api-key": config.APOLLO_API_KEY, "Content-Type": "application/json"}
         payload = {
-            "q_organization_name": company,
+            "organization_ids": [org_id],
             "person_titles": titles,
             "page": 1,
             "per_page": 10,
         }
-        headers = {
-            "X-Api-Key": config.APOLLO_API_KEY,
-            "Content-Type": "application/json",
-        }
-
         try:
             resp = requests.post(
-                APOLLO_SEARCH_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT,
+                APOLLO_PEOPLE_SEARCH_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT,
             )
-            resp.raise_for_status()
             data = resp.json()
-        except requests.exceptions.RequestException as e:
-            logger.warning("Apollo search failed for '%s': %s", company, e)
-            return []
-        except ValueError as e:
-            logger.warning("Apollo returned invalid JSON for '%s': %s", company, e)
+        except (requests.exceptions.RequestException, ValueError) as e:
+            logger.warning("Apollo people search failed for '%s': %s", company, e)
             return []
 
-        people = data.get("people", [])
-        if not people:
+        if self._flag_if_plan_inaccessible(data):
+            return []
+        if "error" in data:
+            logger.warning("Apollo people search error for '%s': %s", company, data["error"])
             return []
 
         contacts = []
-        for person in people:
+        for person in data.get("people", []):
             name = person.get("name") or " ".join(
                 filter(None, [person.get("first_name"), person.get("last_name")])
             )
+            role = person.get("title") or ""
             linkedin_url = person.get("linkedin_url")
-            role = person.get("title", "")
+
+            # Fallback filter in Python in case the server-side person_titles
+            # filter isn't honored by this endpoint.
+            role_lower = role.lower()
+            if not any(sig in role_lower for sig in titles):
+                continue
             if not name or not linkedin_url:
                 continue  # skip incomplete records rather than fabricating data
 
@@ -253,3 +337,45 @@ class ContactFinder:
                 source="apollo",
             ))
         return contacts
+
+    def _flag_if_plan_inaccessible(self, data: dict) -> bool:
+        """
+        Detect Apollo's "your plan doesn't include API access" response and
+        disable further Apollo calls for the rest of this run instead of
+        retrying a permanently-dead key against every company.
+        """
+        if data.get("error_code") == "API_INACCESSIBLE":
+            logger.warning(
+                "Apollo returned API_INACCESSIBLE — your current Apollo "
+                "plan doesn't include API access at all (this is a plan "
+                "restriction, not a bug: confirmed against Apollo's live "
+                "API — every search endpoint 403s on a Free plan). "
+                "Disabling Priority C/D auto-discovery for the rest of "
+                "this run. Upgrade at https://www.apollo.io/pricing if "
+                "you want this to work. (%s)",
+                data.get("error", ""),
+            )
+            self._apollo_unavailable = True
+            return True
+        return False
+
+
+# ── Fuzzy Company Matching ──────────────────────────────────────────
+
+def _normalize_company(name: str) -> str:
+    """Lowercase, strip common suffixes (Inc/Ltd/.com/etc) and punctuation."""
+    n = name.lower().strip()
+    n = n.replace(".com", "")
+    for suffix in _COMPANY_SUFFIXES:
+        if n.endswith(suffix):
+            n = n[: -len(suffix)]
+    n = _NON_ALNUM_RE.sub("", n)
+    return n.strip()
+
+
+def _companies_match(a: str, b: str) -> bool:
+    """True if the normalized forms of two company names overlap either way."""
+    na, nb = _normalize_company(a), _normalize_company(b)
+    if not na or not nb:
+        return False
+    return na in nb or nb in na

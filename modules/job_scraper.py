@@ -1,27 +1,33 @@
 """
 Module 1: Job Scraping / Trigger
-Discovers new job postings from free, no-auth sources only:
-  - Greenhouse's public job board API (no API key required)
-  - Plain RSS/Atom job feeds
-A small hardcoded mock job list is used as a fallback/demo mode so the
-pipeline can be tested without network access or any sources configured.
+Discovers new job postings by keyword, searching ALL companies globally
+via JSearch (free tier on RapidAPI, indexes LinkedIn/Indeed/Glassdoor/etc
+through Google Jobs) — no pre-configured company list, no location filter.
+
+Seen jobs are persisted to seen_jobs.json so re-running the pipeline
+doesn't re-alert on the same posting across days. A small hardcoded mock
+job list is available via --mock for offline testing.
 """
 
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
-import re
-import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
+from datetime import datetime
 from typing import Optional
 
 import requests
 
+import config
+from modules import usage_tracker
+
 logger = logging.getLogger(__name__)
 
-_HTML_TAG_RE = re.compile(r"<[^>]+>")
-REQUEST_TIMEOUT = 10
+JSEARCH_URL = "https://jsearch.p.rapidapi.com/search"
+JSEARCH_HOST = "jsearch.p.rapidapi.com"
+REQUEST_TIMEOUT = 15
 
 
 @dataclass
@@ -45,46 +51,35 @@ class JobPosting:
         text = f"{self.title} {self.description}".lower()
         return any(kw.lower() in text for kw in keywords)
 
-    def matches_locations(self, locations: list[str]) -> bool:
-        """Check if the job location matches any target location."""
-        loc = self.location.lower()
-        return any(target.lower() in loc for target in locations)
-
 
 class JobScraper:
     """
-    Pulls job postings from free sources: Greenhouse boards and RSS feeds.
-    Falls back to a small hardcoded mock list if no real source is
-    configured, or if every configured source returns nothing (e.g. no
-    network access) — this keeps the pipeline testable offline.
+    Searches ALL companies by keyword via JSearch — the scraper never
+    iterates over a pre-configured company list. Falls back to a small
+    hardcoded mock list when `use_mock=True` (--mock flag), for testing
+    without burning JSearch's free-tier request budget.
     """
 
-    def __init__(
-        self,
-        keywords: list[str],
-        locations: list[str] | None = None,
-        greenhouse_slugs: list[str] | None = None,
-        rss_feed_urls: list[str] | None = None,
-    ):
+    def __init__(self, keywords: list[str], use_mock: bool = False):
         self.keywords = keywords
-        self.locations = locations or []
-        self.greenhouse_slugs = greenhouse_slugs or []
-        self.rss_feed_urls = rss_feed_urls or []
-        self._seen_uids: set[str] = set()
+        self.use_mock = use_mock
+        self._seen_uids: set[str] = self._load_seen_uids()
 
     # ── Public API ──────────────────────────────────────────────
 
     def fetch_new_jobs(self) -> list[JobPosting]:
         """
-        Fetch jobs from all configured sources, filter by keywords/location,
-        and return only previously-unseen postings.
+        Fetch jobs (mock or real), filter by keyword, and return only
+        previously-unseen postings. Newly-seen uids are persisted to disk.
         """
-        raw_jobs = self._fetch_all_sources()
+        raw_jobs = self._fetch_mock_jobs() if self.use_mock else self._fetch_from_jsearch()
         filtered = self._apply_filters(raw_jobs)
         new_jobs = [j for j in filtered if j.uid not in self._seen_uids]
 
         for job in new_jobs:
             self._seen_uids.add(job.uid)
+        if new_jobs:
+            self._save_seen_uids(self._seen_uids)
 
         logger.info(
             "Scraper found %d raw → %d filtered → %d new jobs",
@@ -95,120 +90,98 @@ class JobScraper:
     # ── Filters ─────────────────────────────────────────────────
 
     def _apply_filters(self, jobs: list[JobPosting]) -> list[JobPosting]:
-        results = []
-        for job in jobs:
-            if not job.matches_keywords(self.keywords):
-                continue
-            if self.locations and not job.matches_locations(self.locations):
-                continue
-            results.append(job)
-        return results
+        return [j for j in jobs if j.matches_keywords(self.keywords)]
 
-    # ── Source Orchestration ─────────────────────────────────────
+    # ── Keyword Rotation (stay under JSearch's 200 req/month) ────
 
-    def _fetch_all_sources(self) -> list[JobPosting]:
-        """Pull from every configured free source; fall back to mock data."""
+    def _keywords_for_today(self) -> list[str]:
+        """
+        Query exactly ONE keyword per day — day_of_year % len(keywords)
+        picks which one — so a daily run costs ~1 JSearch request instead
+        of one per keyword. The full list still gets covered once every
+        len(keywords) days, and this keeps monthly usage far under the
+        free-tier cap even with a long keyword list.
+        """
+        if not self.keywords:
+            return []
+        day_of_year = datetime.now().timetuple().tm_yday
+        index = day_of_year % len(self.keywords)
+        return [self.keywords[index]]
+
+    # ── JSearch (free tier) ───────────────────────────────────────
+
+    def _fetch_from_jsearch(self) -> list[JobPosting]:
+        if not config.RAPIDAPI_KEY:
+            logger.warning("RAPIDAPI_KEY not set — skipping job search (use --mock to test).")
+            return []
+
+        keywords_today = self._keywords_for_today()
+        if not keywords_today:
+            logger.info("No keywords scheduled for today's rotation slot.")
+            return []
+
         jobs: list[JobPosting] = []
-
-        for slug in self.greenhouse_slugs:
-            jobs += self._fetch_from_greenhouse(slug)
-
-        for feed_url in self.rss_feed_urls:
-            jobs += self._fetch_from_rss(feed_url)
-
-        if not jobs:
-            reason = (
-                "no sources configured"
-                if not (self.greenhouse_slugs or self.rss_feed_urls)
-                else "configured sources returned nothing (offline or empty boards)"
-            )
-            logger.info("Falling back to mock/demo job data — %s", reason)
-            jobs = self._fetch_mock_jobs()
-
+        for keyword in keywords_today:
+            if not usage_tracker.can_call_jsearch():
+                break  # monthly cap reached — stop issuing further requests
+            usage_tracker.record_jsearch_call()
+            jobs += self._search_jsearch(keyword)
         return jobs
 
-    # ── Free Data Sources ────────────────────────────────────────
-
     @staticmethod
-    def _fetch_from_greenhouse(company_slug: str) -> list[JobPosting]:
-        """
-        Pull open roles from a public Greenhouse job board.
-        Free, no API key required: https://boards-api.greenhouse.io
-        """
-        url = f"https://boards-api.greenhouse.io/v1/boards/{company_slug}/jobs"
+    def _search_jsearch(keyword: str) -> list[JobPosting]:
+        """One JSearch request for a single keyword, across all companies/locations."""
+        headers = {
+            "X-RapidAPI-Key": config.RAPIDAPI_KEY,
+            "X-RapidAPI-Host": JSEARCH_HOST,
+        }
+        params = {
+            "query": keyword,
+            "date_posted": "3days",  # fresh postings only, avoids re-alerting on stale ones
+            "num_pages": "1",
+        }
         try:
-            resp = requests.get(url, params={"content": "true"}, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            logger.warning("Greenhouse fetch failed for '%s': %s", company_slug, e)
-            return []
-
-        try:
+            resp = requests.get(JSEARCH_URL, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
             data = resp.json()
-        except ValueError as e:
-            logger.warning("Greenhouse returned invalid JSON for '%s': %s", company_slug, e)
+        except (requests.exceptions.RequestException, ValueError) as e:
+            logger.warning("JSearch request failed for '%s': %s", keyword, e)
+            return []
+
+        if data.get("status") != "OK":
+            # e.g. {"message": "You are not subscribed to this API."} on RapidAPI,
+            # or a JSearch-side error payload — either way, skip gracefully.
+            logger.warning(
+                "JSearch returned no results for '%s': %s",
+                keyword, data.get("message") or data.get("error") or data,
+            )
             return []
 
         jobs = []
-        for item in data.get("jobs", []):
-            description = _HTML_TAG_RE.sub(" ", item.get("content", "")).strip()
+        for item in data.get("data", []):
+            location_parts = [p for p in (item.get("job_city"), item.get("job_country")) if p]
+            if location_parts:
+                location = ", ".join(location_parts)
+            elif item.get("job_is_remote"):
+                location = "Remote"
+            else:
+                location = "Unknown"
+
             jobs.append(JobPosting(
-                title=item.get("title", "Unknown role"),
-                company=item.get("company_name", company_slug),
-                location=(item.get("location") or {}).get("name", "Unknown"),
-                url=item.get("absolute_url", ""),
-                description=description,
-                posted_date=item.get("updated_at"),
-                source="greenhouse",
+                title=item.get("job_title", "Unknown role"),
+                company=item.get("employer_name", "Unknown company"),
+                location=location,
+                url=item.get("job_apply_link") or item.get("job_google_link") or "",
+                description=item.get("job_description", "") or "",
+                posted_date=item.get("job_posted_at_datetime_utc"),
+                source="jsearch",
             ))
         return jobs
 
-    @staticmethod
-    def _fetch_from_rss(feed_url: str) -> list[JobPosting]:
-        """Parse a plain RSS/Atom feed for job postings using the stdlib only."""
-        try:
-            resp = requests.get(feed_url, timeout=REQUEST_TIMEOUT)
-            resp.raise_for_status()
-        except requests.exceptions.RequestException as e:
-            logger.warning("RSS fetch failed for '%s': %s", feed_url, e)
-            return []
-
-        try:
-            root = ET.fromstring(resp.content)
-        except ET.ParseError as e:
-            logger.warning("RSS parse failed for '%s': %s", feed_url, e)
-            return []
-
-        jobs = []
-        # Support both RSS 2.0 (<item>) and Atom (<entry>) formats.
-        items = root.findall(".//item") or root.findall(
-            ".//{http://www.w3.org/2005/Atom}entry"
-        )
-        for entry in items:
-            title = _text_of(entry, "title")
-            link = _text_of(entry, "link") or _atom_link(entry)
-            description = _HTML_TAG_RE.sub(
-                " ", _text_of(entry, "description") or _text_of(entry, "summary") or ""
-            ).strip()
-            pub_date = _text_of(entry, "pubDate") or _text_of(entry, "updated")
-
-            if not title or not link:
-                continue
-
-            jobs.append(JobPosting(
-                title=title,
-                company=_text_of(root.find(".//channel"), "title") or "Unknown",
-                location="Unknown",
-                url=link,
-                description=description,
-                posted_date=pub_date,
-                source="rss",
-            ))
-        return jobs
+    # ── Mock / Offline Demo Data ──────────────────────────────────
 
     @staticmethod
     def _fetch_mock_jobs() -> list[JobPosting]:
-        """Simulated job feed — used as a fallback/demo when no real source is configured."""
+        """Simulated job feed — used only when explicitly requested via --mock."""
         return [
             JobPosting(
                 title="Backend Software Developer",
@@ -260,16 +233,24 @@ class JobScraper:
             ),
         ]
 
+    # ── seen_jobs.json persistence ─────────────────────────────────
 
-def _text_of(node: Optional[ET.Element], tag: str) -> str:
-    """Safely read the text of a direct child tag, empty string if missing."""
-    if node is None:
-        return ""
-    child = node.find(tag)
-    return (child.text or "").strip() if child is not None else ""
+    @staticmethod
+    def _load_seen_uids() -> set[str]:
+        path = config.SEEN_JOBS_FILE
+        if not path.exists():
+            return set()
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return set(json.load(f))
+        except (json.JSONDecodeError, OSError) as e:
+            logger.warning("Failed to load %s: %s — starting with an empty seen-jobs set.", path.name, e)
+            return set()
 
-
-def _atom_link(entry: ET.Element) -> str:
-    """Atom <link href="..."/> is an attribute, not text — read it directly."""
-    link = entry.find("{http://www.w3.org/2005/Atom}link")
-    return link.get("href", "") if link is not None else ""
+    @staticmethod
+    def _save_seen_uids(uids: set[str]) -> None:
+        try:
+            with open(config.SEEN_JOBS_FILE, "w", encoding="utf-8") as f:
+                json.dump(sorted(uids), f, indent=2)
+        except OSError as e:
+            logger.warning("Failed to save %s: %s", config.SEEN_JOBS_FILE.name, e)
