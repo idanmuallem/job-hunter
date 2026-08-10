@@ -6,7 +6,12 @@ __pycache__/
 # Secrets — never commit real tokens/keys
 קודים לTELEGRAM.txt
 .env
+# config.py holds real profile info alongside the standard settings —
+# kept local-only per earlier request; config.example.py is the committed template.
 config.py
+
+# Manual contacts list — contains real people's names/LinkedIn URLs
+known_connections.json
 
 # Runtime-generated data
 outreach_log.jsonl

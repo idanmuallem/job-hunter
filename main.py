@@ -8,9 +8,10 @@ Run modes:
     python main.py --daily --hour 9   → Run once per day at 09:00
     python main.py --telegram         → Enable Telegram notifications
 
-Set API keys via environment variables:
-    export TELEGRAM_BOT_TOKEN="..."
-    export TELEGRAM_CHAT_ID="..."
+Set API keys via a local .env file (see .env.example):
+    TELEGRAM_BOT_TOKEN=...
+    TELEGRAM_CHAT_ID=...
+    APOLLO_API_KEY=...   (optional)
 """
 
 import argparse
@@ -19,6 +20,7 @@ import sys
 
 sys.path.insert(0, ".")
 
+import config
 from pipeline import JobHunterPipeline
 
 
@@ -79,6 +81,13 @@ def main():
     logger = logging.getLogger("main")
 
     logger.info("🚀 Initializing Job Hunter Agent...")
+
+    # Surface missing/optional config up front instead of failing silently —
+    # the pipeline still runs in degraded mode (console-only, manual
+    # contacts only) when keys are missing.
+    for warning in config.check_keys():
+        logger.warning("⚠️  %s", warning)
+
     pipeline = JobHunterPipeline(use_telegram=args.telegram)
 
     if args.daily:

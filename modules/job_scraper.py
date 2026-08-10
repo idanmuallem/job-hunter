@@ -1,18 +1,27 @@
 """
 Module 1: Job Scraping / Trigger
-Discovers new job postings via mock data, RSS feeds, or API integrations.
-Swap the mock for real sources (LinkedIn API, Greenhouse, Lever, etc.).
+Discovers new job postings from free, no-auth sources only:
+  - Greenhouse's public job board API (no API key required)
+  - Plain RSS/Atom job feeds
+A small hardcoded mock job list is used as a fallback/demo mode so the
+pipeline can be tested without network access or any sources configured.
 """
 
 from __future__ import annotations
 
-import logging
 import hashlib
+import logging
+import re
+import xml.etree.ElementTree as ET
 from dataclasses import dataclass, field
-from datetime import datetime
 from typing import Optional
 
+import requests
+
 logger = logging.getLogger(__name__)
+
+_HTML_TAG_RE = re.compile(r"<[^>]+>")
+REQUEST_TIMEOUT = 10
 
 
 @dataclass
@@ -44,27 +53,33 @@ class JobPosting:
 
 class JobScraper:
     """
-    Pulls job postings from configured sources.
-    Currently uses mock data — replace _fetch_mock_jobs() with real integrations.
+    Pulls job postings from free sources: Greenhouse boards and RSS feeds.
+    Falls back to a small hardcoded mock list if no real source is
+    configured, or if every configured source returns nothing (e.g. no
+    network access) — this keeps the pipeline testable offline.
     """
 
-    def __init__(self, keywords: list[str], locations: list[str] | None = None):
+    def __init__(
+        self,
+        keywords: list[str],
+        locations: list[str] | None = None,
+        greenhouse_slugs: list[str] | None = None,
+        rss_feed_urls: list[str] | None = None,
+    ):
         self.keywords = keywords
         self.locations = locations or []
+        self.greenhouse_slugs = greenhouse_slugs or []
+        self.rss_feed_urls = rss_feed_urls or []
         self._seen_uids: set[str] = set()
 
     # ── Public API ──────────────────────────────────────────────
 
     def fetch_new_jobs(self) -> list[JobPosting]:
         """
-        Fetch jobs from all sources, filter by keywords/location,
+        Fetch jobs from all configured sources, filter by keywords/location,
         and return only previously-unseen postings.
         """
-        raw_jobs = self._fetch_mock_jobs()
-        # Plug in real sources here:
-        # raw_jobs += self._fetch_from_rss("https://example.com/jobs.rss")
-        # raw_jobs += self._fetch_from_greenhouse("company-slug")
-
+        raw_jobs = self._fetch_all_sources()
         filtered = self._apply_filters(raw_jobs)
         new_jobs = [j for j in filtered if j.uid not in self._seen_uids]
 
@@ -89,11 +104,111 @@ class JobScraper:
             results.append(job)
         return results
 
-    # ── Data Sources (swap these out) ───────────────────────────
+    # ── Source Orchestration ─────────────────────────────────────
+
+    def _fetch_all_sources(self) -> list[JobPosting]:
+        """Pull from every configured free source; fall back to mock data."""
+        jobs: list[JobPosting] = []
+
+        for slug in self.greenhouse_slugs:
+            jobs += self._fetch_from_greenhouse(slug)
+
+        for feed_url in self.rss_feed_urls:
+            jobs += self._fetch_from_rss(feed_url)
+
+        if not jobs:
+            reason = (
+                "no sources configured"
+                if not (self.greenhouse_slugs or self.rss_feed_urls)
+                else "configured sources returned nothing (offline or empty boards)"
+            )
+            logger.info("Falling back to mock/demo job data — %s", reason)
+            jobs = self._fetch_mock_jobs()
+
+        return jobs
+
+    # ── Free Data Sources ────────────────────────────────────────
+
+    @staticmethod
+    def _fetch_from_greenhouse(company_slug: str) -> list[JobPosting]:
+        """
+        Pull open roles from a public Greenhouse job board.
+        Free, no API key required: https://boards-api.greenhouse.io
+        """
+        url = f"https://boards-api.greenhouse.io/v1/boards/{company_slug}/jobs"
+        try:
+            resp = requests.get(url, params={"content": "true"}, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            logger.warning("Greenhouse fetch failed for '%s': %s", company_slug, e)
+            return []
+
+        try:
+            data = resp.json()
+        except ValueError as e:
+            logger.warning("Greenhouse returned invalid JSON for '%s': %s", company_slug, e)
+            return []
+
+        jobs = []
+        for item in data.get("jobs", []):
+            description = _HTML_TAG_RE.sub(" ", item.get("content", "")).strip()
+            jobs.append(JobPosting(
+                title=item.get("title", "Unknown role"),
+                company=item.get("company_name", company_slug),
+                location=(item.get("location") or {}).get("name", "Unknown"),
+                url=item.get("absolute_url", ""),
+                description=description,
+                posted_date=item.get("updated_at"),
+                source="greenhouse",
+            ))
+        return jobs
+
+    @staticmethod
+    def _fetch_from_rss(feed_url: str) -> list[JobPosting]:
+        """Parse a plain RSS/Atom feed for job postings using the stdlib only."""
+        try:
+            resp = requests.get(feed_url, timeout=REQUEST_TIMEOUT)
+            resp.raise_for_status()
+        except requests.exceptions.RequestException as e:
+            logger.warning("RSS fetch failed for '%s': %s", feed_url, e)
+            return []
+
+        try:
+            root = ET.fromstring(resp.content)
+        except ET.ParseError as e:
+            logger.warning("RSS parse failed for '%s': %s", feed_url, e)
+            return []
+
+        jobs = []
+        # Support both RSS 2.0 (<item>) and Atom (<entry>) formats.
+        items = root.findall(".//item") or root.findall(
+            ".//{http://www.w3.org/2005/Atom}entry"
+        )
+        for entry in items:
+            title = _text_of(entry, "title")
+            link = _text_of(entry, "link") or _atom_link(entry)
+            description = _HTML_TAG_RE.sub(
+                " ", _text_of(entry, "description") or _text_of(entry, "summary") or ""
+            ).strip()
+            pub_date = _text_of(entry, "pubDate") or _text_of(entry, "updated")
+
+            if not title or not link:
+                continue
+
+            jobs.append(JobPosting(
+                title=title,
+                company=_text_of(root.find(".//channel"), "title") or "Unknown",
+                location="Unknown",
+                url=link,
+                description=description,
+                posted_date=pub_date,
+                source="rss",
+            ))
+        return jobs
 
     @staticmethod
     def _fetch_mock_jobs() -> list[JobPosting]:
-        """Simulated job feed — replace with real API calls."""
+        """Simulated job feed — used as a fallback/demo when no real source is configured."""
         return [
             JobPosting(
                 title="Backend Software Developer",
@@ -145,38 +260,16 @@ class JobScraper:
             ),
         ]
 
-    # ── Real source stubs (uncomment and implement) ─────────────
 
-    # def _fetch_from_rss(self, feed_url: str) -> list[JobPosting]:
-    #     """Parse an RSS/Atom feed for job postings."""
-    #     import feedparser
-    #     feed = feedparser.parse(feed_url)
-    #     jobs = []
-    #     for entry in feed.entries:
-    #         jobs.append(JobPosting(
-    #             title=entry.title,
-    #             company=self._extract_company(entry),
-    #             location=entry.get("location", "Unknown"),
-    #             url=entry.link,
-    #             description=entry.get("summary", ""),
-    #             source="rss",
-    #         ))
-    #     return jobs
+def _text_of(node: Optional[ET.Element], tag: str) -> str:
+    """Safely read the text of a direct child tag, empty string if missing."""
+    if node is None:
+        return ""
+    child = node.find(tag)
+    return (child.text or "").strip() if child is not None else ""
 
-    # def _fetch_from_greenhouse(self, company_slug: str) -> list[JobPosting]:
-    #     """Pull from Greenhouse API (no auth needed for public boards)."""
-    #     import requests
-    #     resp = requests.get(f"https://boards-api.greenhouse.io/v1/boards/{company_slug}/jobs")
-    #     resp.raise_for_status()
-    #     jobs = []
-    #     for item in resp.json().get("jobs", []):
-    #         loc = item.get("location", {}).get("name", "Unknown")
-    #         jobs.append(JobPosting(
-    #             title=item["title"],
-    #             company=company_slug,
-    #             location=loc,
-    #             url=item["absolute_url"],
-    #             description=item.get("content", ""),
-    #             source="greenhouse",
-    #         ))
-    #     return jobs
+
+def _atom_link(entry: ET.Element) -> str:
+    """Atom <link href="..."/> is an attribute, not text — read it directly."""
+    link = entry.find("{http://www.w3.org/2005/Atom}link")
+    return link.get("href", "") if link is not None else ""

@@ -14,6 +14,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Optional
 
+import requests
+
 import config
 
 logger = logging.getLogger(__name__)
@@ -109,16 +111,19 @@ class TelegramAlert(AlertChannel):
             "disable_web_page_preview": True,
         }
 
+        if not self.bot_token or not self.chat_id:
+            logger.warning(
+                "Telegram not configured (missing bot token/chat id) — skipping alert."
+            )
+            return False
+
         try:
-            import requests
             resp = requests.post(self.api_url, json=payload, timeout=10)
             resp.raise_for_status()
             logger.info("Telegram alert sent for %s at %s", alert.job_title, alert.company)
             return True
-        except ImportError:
-            logger.error("requests package not installed — cannot send Telegram alert")
-            return False
-        except Exception as e:
+        except requests.exceptions.RequestException as e:
+            # Never let a failed notification crash the whole pipeline run.
             logger.error("Telegram alert failed: %s", e)
             return False
 

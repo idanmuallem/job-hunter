@@ -1,23 +1,35 @@
 """
 Module 2: The Finder Logic (Target Prioritization)
-Searches for employees at a target company and selects the single best
-contact based on the strict priority hierarchy:
-  A) 1st-degree connections
-  B) Alumni (BGU / McGill)
-  C) Engineering Managers, Tech Leads
-  D) HR / Technical Recruiters
+Finds people to contact at a target company from two free sources and
+ranks them by a strict priority hierarchy:
+  A) 1st-degree connections     — known_connections.json (manual, free)
+  B) Alumni (BGU / McGill)      — known_connections.json (manual, free)
+  C) Engineering Managers/Leads — Apollo.io free tier (auto-discovered)
+  D) HR / Technical Recruiters  — Apollo.io free tier (auto-discovered)
+
+We never scrape or log into LinkedIn — that violates its Terms of
+Service. known_connections.json is the intended, ToS-compliant way to
+capture your own network; Apollo's free tier only ever discloses
+name/title/company/LinkedIn URL (revealing emails/phone is what costs
+credits, and this project never does that).
 """
 
 from __future__ import annotations
 
+import json
 import logging
 from dataclasses import dataclass
 from enum import IntEnum
 from typing import Optional
 
+import requests
+
 import config
 
 logger = logging.getLogger(__name__)
+
+APOLLO_SEARCH_URL = "https://api.apollo.io/api/v1/mixed_people/search"
+REQUEST_TIMEOUT = 10
 
 
 class Priority(IntEnum):
@@ -39,6 +51,7 @@ class Contact:
     is_first_degree: bool = False
     university: str = ""
     department: str = ""
+    source: str = "known_connections"
 
     @property
     def priority(self) -> Priority:
@@ -54,21 +67,9 @@ class Contact:
             return Priority.B
 
         role_lower = self.role.lower()
-        eng_signals = [
-            "engineering manager", "tech lead", "team lead",
-            "data engineering manager", "principal engineer",
-            "staff engineer", "director of engineering",
-            "vp engineering", "head of engineering",
-        ]
-        if any(signal in role_lower for signal in eng_signals):
+        if any(signal in role_lower for signal in config.ENGINEERING_TITLES):
             return Priority.C
-
-        hr_signals = [
-            "recruiter", "talent acquisition", "hr ",
-            "human resources", "people operations",
-            "technical recruiter", "sourcer",
-        ]
-        if any(signal in role_lower for signal in hr_signals):
+        if any(signal in role_lower for signal in config.HR_TITLES):
             return Priority.D
 
         return Priority.NONE
@@ -83,13 +84,16 @@ class Contact:
 
 class ContactFinder:
     """
-    Finds and ranks contacts at a target company.
-    Uses mock data by default — swap _search_company_employees()
-    for real Proxycurl / Apollo / LinkedIn API calls.
+    Finds and ranks contacts at a target company by merging:
+      1. known_connections.json (manual, free — Priority A/B)
+      2. Apollo.io free-tier search (auto, free — Priority C/D)
+    Works with just #1 if Apollo isn't configured; never fabricates
+    placeholder people if nothing is found.
     """
 
     def __init__(self):
         self._cache: dict[str, list[Contact]] = {}
+        self._known_connections = self._load_known_connections()
 
     def find_best_contact(self, company: str) -> Optional[Contact]:
         """Convenience wrapper — returns the single top contact."""
@@ -98,19 +102,19 @@ class ContactFinder:
 
     def find_top_contacts(self, company: str, n: int = 3) -> list[Contact]:
         """
-        Search for employees at `company` and return up to `n`
-        contacts, ranked by the priority hierarchy (A → B → C → D).
-        Returns an empty list if nobody relevant is found.
+        Search for people at `company` and return up to `n` contacts,
+        ranked by the priority hierarchy (A → B → C → D).
+        Returns an empty list if nobody relevant is found — never
+        fabricates placeholder contacts.
         """
-        employees = self._get_employees(company)
-        if not employees:
-            logger.warning("No employees found at %s", company)
-            return []
+        key = company.lower().strip()
+        if key not in self._cache:
+            self._cache[key] = self._gather_contacts(company)
+        contacts = self._cache[key]
 
-        # Keep only contacts that match at least one priority bucket
-        ranked = [c for c in employees if c.priority != Priority.NONE]
+        ranked = [c for c in contacts if c.priority != Priority.NONE]
         if not ranked:
-            logger.warning("No prioritized contacts at %s", company)
+            logger.warning("No prioritized contacts found at %s", company)
             return []
 
         ranked.sort(key=lambda c: c.priority)
@@ -123,136 +127,129 @@ class ContactFinder:
         )
         return top
 
-    # ── Data Source ──────────────────────────────────────────────
+    # ── Source Aggregation ───────────────────────────────────────
 
-    def _get_employees(self, company: str) -> list[Contact]:
-        """Fetch employees, with simple caching."""
+    def _gather_contacts(self, company: str) -> list[Contact]:
+        """Merge known connections and Apollo results, de-duplicated by name."""
+        contacts: list[Contact] = []
+        seen_names: set[str] = set()
+
+        for contact in self._get_known_contacts(company):
+            if contact.name.lower() not in seen_names:
+                contacts.append(contact)
+                seen_names.add(contact.name.lower())
+
+        for contact in self._search_apollo(company):
+            if contact.name.lower() not in seen_names:
+                contacts.append(contact)
+                seen_names.add(contact.name.lower())
+
+        return contacts
+
+    # ── Source 1: known_connections.json (manual, free) ──────────
+
+    def _get_known_contacts(self, company: str) -> list[Contact]:
         key = company.lower().strip()
-        if key not in self._cache:
-            self._cache[key] = self._search_company_employees(company)
-        return self._cache[key]
+        entries = []
+        for db_key, people in self._known_connections.items():
+            if db_key in key or key in db_key:
+                entries = people
+                break
+
+        return [
+            Contact(
+                name=e["name"],
+                role=e.get("role", ""),
+                company=company,
+                linkedin_url=e.get("linkedin_url", ""),
+                is_first_degree=e.get("is_first_degree", False),
+                university=e.get("university", ""),
+                department=e.get("department", ""),
+                source="known_connections",
+            )
+            for e in entries
+        ]
 
     @staticmethod
-    def _search_company_employees(company: str) -> list[Contact]:
-        """
-        Mock employee data — replace with real API integration.
-        Example real implementation using Proxycurl:
-
-            import requests
-            headers = {"Authorization": f"Bearer {config.PROXYCURL_API_KEY}"}
-            resp = requests.get(
-                "https://nubela.co/proxycurl/api/linkedin/company/employees/",
-                params={"url": company_linkedin_url, "role_search": "engineering"},
-                headers=headers,
+    def _load_known_connections() -> dict[str, list[dict]]:
+        """Load the user's manual connections file. Missing file → empty dict."""
+        path = config.KNOWN_CONNECTIONS_FILE
+        if not path.exists():
+            logger.warning(
+                "%s not found — Priority A/B contacts unavailable. "
+                "Copy known_connections.example.json to get started.",
+                path.name,
             )
-            resp.raise_for_status()
-            return [Contact(...) for item in resp.json()["employees"]]
+            return {}
+
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (json.JSONDecodeError, OSError) as e:
+            logger.error("Failed to load %s: %s", path.name, e)
+            return {}
+
+        # Keys starting with "_" (e.g. "_readme") are documentation, not companies.
+        return {k: v for k, v in data.items() if not k.startswith("_")}
+
+    # ── Source 2: Apollo.io free tier (auto-discovery, free) ─────
+
+    @staticmethod
+    def _search_apollo(company: str) -> list[Contact]:
         """
-        mock_db: dict[str, list[Contact]] = {
-            "nvidia": [
-                Contact(
-                    name="Yael Cohen",
-                    role="Engineering Manager – Cloud Platform",
-                    company="NVIDIA",
-                    linkedin_url="https://linkedin.com/in/yael-cohen-mock",
-                    is_first_degree=False,
-                    university="Ben-Gurion University of the Negev",
-                    department="Cloud Platform",
-                ),
-                Contact(
-                    name="Tom Raviv",
-                    role="Senior Backend Developer",
-                    company="NVIDIA",
-                    linkedin_url="https://linkedin.com/in/tom-raviv-mock",
-                    is_first_degree=True,
-                    university="Technion",
-                    department="AI Infrastructure",
-                ),
-                Contact(
-                    name="Sarah Miller",
-                    role="Technical Recruiter",
-                    company="NVIDIA",
-                    linkedin_url="https://linkedin.com/in/sarah-miller-mock",
-                    is_first_degree=False,
-                    university="Tel Aviv University",
-                    department="Talent Acquisition",
-                ),
-                Contact(
-                    name="Amit Shazar",
-                    role="Data Engineer",
-                    company="NVIDIA",
-                    linkedin_url="https://linkedin.com/in/amit-shazar-mock",
-                    is_first_degree=False,
-                    university="Ben-Gurion University of the Negev",
-                    department="Data Platform",
-                ),
-            ],
-            "wix": [
-                Contact(
-                    name="Noa Levi",
-                    role="Tech Lead – Data Engineering",
-                    company="Wix",
-                    linkedin_url="https://linkedin.com/in/noa-levi-mock",
-                    is_first_degree=False,
-                    university="Hebrew University",
-                    department="Data Engineering",
-                ),
-                Contact(
-                    name="Daniel Katz",
-                    role="HR Business Partner",
-                    company="Wix",
-                    linkedin_url="https://linkedin.com/in/daniel-katz-mock",
-                    is_first_degree=False,
-                    university="McGill University",
-                    department="People",
-                ),
-            ],
-            "monday.com": [
-                Contact(
-                    name="Omer Ben-David",
-                    role="Director of Engineering – Platform",
-                    company="Monday.com",
-                    linkedin_url="https://linkedin.com/in/omer-bd-mock",
-                    is_first_degree=False,
-                    university="Technion",
-                    department="Platform",
-                ),
-            ],
-            "cyberark": [
-                Contact(
-                    name="Lior Azulay",
-                    role="Engineering Manager – Identity Security",
-                    company="CyberArk",
-                    linkedin_url="https://linkedin.com/in/lior-azulay-mock",
-                    is_first_degree=False,
-                    university="Ben-Gurion University of the Negev",
-                    department="Identity Security",
-                ),
-                Contact(
-                    name="Shira Nahum",
-                    role="Talent Acquisition Partner",
-                    company="CyberArk",
-                    linkedin_url="https://linkedin.com/in/shira-nahum-mock",
-                    is_first_degree=False,
-                    university="IDC Herzliya",
-                    department="HR",
-                ),
-            ],
-            "appsflyer": [
-                Contact(
-                    name="Gal Friedman",
-                    role="Technical Recruiter",
-                    company="AppsFlyer",
-                    linkedin_url="https://linkedin.com/in/gal-friedman-mock",
-                    is_first_degree=False,
-                    university="Bar-Ilan University",
-                    department="Talent",
-                ),
-            ],
+        Search Apollo's free tier for engineering leads and recruiters at
+        `company`. Returns [] on any failure — must never crash the pipeline.
+        """
+        if not config.APOLLO_API_KEY:
+            return []
+
+        titles = ["Engineering Manager", "Tech Lead", "Technical Recruiter", "Talent Acquisition"]
+        payload = {
+            "q_organization_name": company,
+            "person_titles": titles,
+            "page": 1,
+            "per_page": 10,
+        }
+        headers = {
+            "X-Api-Key": config.APOLLO_API_KEY,
+            "Content-Type": "application/json",
         }
 
-        key = company.lower().strip()
-        for db_key, contacts in mock_db.items():
-            if db_key in key or key in db_key:
-                return contacts
-        return []
+        try:
+            resp = requests.post(
+                APOLLO_SEARCH_URL, json=payload, headers=headers, timeout=REQUEST_TIMEOUT,
+            )
+            resp.raise_for_status()
+            data = resp.json()
+        except requests.exceptions.RequestException as e:
+            logger.warning("Apollo search failed for '%s': %s", company, e)
+            return []
+        except ValueError as e:
+            logger.warning("Apollo returned invalid JSON for '%s': %s", company, e)
+            return []
+
+        people = data.get("people", [])
+        if not people:
+            return []
+
+        contacts = []
+        for person in people:
+            name = person.get("name") or " ".join(
+                filter(None, [person.get("first_name"), person.get("last_name")])
+            )
+            linkedin_url = person.get("linkedin_url")
+            role = person.get("title", "")
+            if not name or not linkedin_url:
+                continue  # skip incomplete records rather than fabricating data
+
+            contacts.append(Contact(
+                name=name,
+                role=role,
+                company=(person.get("organization") or {}).get("name", company),
+                linkedin_url=linkedin_url,
+                is_first_degree=False,
+                university="",
+                department="",
+                source="apollo",
+            ))
+        return contacts

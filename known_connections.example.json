@@ -1,0 +1,37 @@
+{
+  "_readme": [
+    "Copy this file to known_connections.json (which is gitignored) and fill",
+    "in real people you actually know — this is the ONLY source for Priority",
+    "A (1st-degree connections) and Priority B (university alumni) contacts.",
+    "We never scrape or log into LinkedIn to discover these automatically.",
+    "",
+    "Top-level keys are company names, lowercased. Each entry needs:",
+    "  name           - the person's full name",
+    "  role           - their job title",
+    "  linkedin_url   - link to their LinkedIn profile",
+    "  is_first_degree - true if you're already connected on LinkedIn",
+    "  university     - fill in if they share your school (leave '' if not),",
+    "                    matched against config.py's PROFILE university fields",
+    "  department     - optional, shown in the Telegram alert for context",
+    "",
+    "Keys starting with an underscore (like this one) are ignored by the loader."
+  ],
+  "example-company": [
+    {
+      "name": "Jane Doe",
+      "role": "Senior Backend Developer",
+      "linkedin_url": "https://linkedin.com/in/jane-doe-example",
+      "is_first_degree": true,
+      "university": "",
+      "department": "Platform Engineering"
+    },
+    {
+      "name": "John Smith",
+      "role": "Software Engineer",
+      "linkedin_url": "https://linkedin.com/in/john-smith-example",
+      "is_first_degree": false,
+      "university": "Ben-Gurion University of the Negev",
+      "department": "Data Infrastructure"
+    }
+  ]
+}

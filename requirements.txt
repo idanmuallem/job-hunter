@@ -1,11 +1,3 @@
-# Core
+# Core — $0/month, no paid APIs or LLM SDKs.
 requests>=2.31.0
-
-# Optional: RSS feed parsing
-# feedparser>=6.0.0
-
-# Optional: Scheduling
-# schedule>=1.2.0
-
-# Optional: Async support
-# aiohttp>=3.9.0
+python-dotenv>=1.0.0

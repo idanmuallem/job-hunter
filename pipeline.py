@@ -55,22 +55,31 @@ class JobHunterPipeline:
         self,
         use_telegram: bool = False,
     ):
-        # Module 1: Job Scraper
+        # Module 1: Job Scraper (Greenhouse + RSS, both free; mock fallback)
         self.scraper = JobScraper(
             keywords=config.JOB_KEYWORDS,
             locations=config.TARGET_LOCATIONS,
+            greenhouse_slugs=config.GREENHOUSE_COMPANY_SLUGS,
+            rss_feed_urls=config.RSS_FEED_URLS,
         )
 
-        # Module 2: Contact Finder
+        # Module 2: Contact Finder (known_connections.json + Apollo free tier)
         self.finder = ContactFinder()
 
-        # Module 3: Message Generator (hardcoded template, no LLM)
+        # Module 3: Message Templater (hardcoded template, no LLM)
         self.generator = MessageGenerator()
 
         # Module 4: Alert Dispatcher
         channels = [ConsoleAlert(), JsonLogAlert()]
         if use_telegram:
-            channels.insert(0, TelegramAlert())
+            if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
+                channels.insert(0, TelegramAlert())
+            else:
+                logger.warning(
+                    "--telegram was requested but TELEGRAM_BOT_TOKEN/"
+                    "TELEGRAM_CHAT_ID are missing — running in console-only "
+                    "mode instead."
+                )
         self.alerter = AlertDispatcher(channels=channels)
 
         self._processed_count = 0
