@@ -1,0 +1,12 @@
+# Virtual environment
+venv/
+__pycache__/
+*.pyc
+
+# Secrets — never commit real tokens/keys
+קודים לTELEGRAM.txt
+.env
+config.py
+
+# Runtime-generated data
+outreach_log.jsonl
