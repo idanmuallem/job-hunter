@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import logging
 from abc import ABC, abstractmethod
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Optional
@@ -34,17 +34,31 @@ class OutreachPackage:
 
 
 @dataclass
+class SearchFallbackPackage:
+    """
+    A LinkedIn people-search link shown when no named contact was found
+    (Priority E) — no message attached, since there's no name to
+    personalize with. The human clicks through and picks someone.
+    """
+    label: str
+    category: str  # "engineering" | "hr"
+    search_url: str
+
+
+@dataclass
 class JobAlert:
-    """A full alert for one job posting, containing up to 3 contacts."""
+    """A full alert for one job posting, containing up to 3 contacts —
+    or, if none were found, one or more LinkedIn search fallbacks."""
     company: str
     job_title: str
     job_url: str
     posted_date: Optional[str]
     contacts: list[OutreachPackage]
+    search_fallbacks: list[SearchFallbackPackage] = field(default_factory=list)
 
     @property
     def is_valid(self) -> bool:
-        return len(self.contacts) > 0
+        return len(self.contacts) > 0 or len(self.search_fallbacks) > 0
 
 
 class AlertChannel(ABC):
@@ -97,6 +111,15 @@ class TelegramAlert(AlertChannel):
                 f"",
                 f"━━━━━━━━━━━━━━━━━━━━━",
             ]
+
+        if alert.search_fallbacks:
+            lines += [
+                f"",
+                f"🔎 *No known contact at {alert.company} — try these LinkedIn searches:*",
+            ]
+            for fb in alert.search_fallbacks:
+                lines += [f"   • [{fb.label}]({fb.search_url})"]
+            lines += [f"", f"━━━━━━━━━━━━━━━━━━━━━"]
 
         lines += [
             f"",
@@ -153,6 +176,12 @@ class ConsoleAlert(AlertChannel):
             print(f"  {pkg.message}")
             print(f"  {thin}")
 
+        if alert.search_fallbacks:
+            print(f"\n  🔎 No known contact — try these LinkedIn searches:")
+            for fb in alert.search_fallbacks:
+                print(f"     • {fb.label}: {fb.search_url}")
+            print(f"  {thin}")
+
         print()
         return True
 
@@ -180,6 +209,14 @@ class JsonLogAlert(AlertChannel):
                     "char_count": pkg.char_count,
                 }
                 for pkg in alert.contacts
+            ],
+            "search_fallbacks": [
+                {
+                    "label": fb.label,
+                    "category": fb.category,
+                    "search_url": fb.search_url,
+                }
+                for fb in alert.search_fallbacks
             ],
         }
         try:

@@ -39,6 +39,41 @@ JOB_KEYWORDS = [
     "Cloud Engineer",
 ]
 
+# ─── Israeli-company ATS crawl (free, unlimited — see job_scraper.py) ──
+# Hand-curated companies known to be on Greenhouse or Lever, crawled
+# directly via their own public job-board APIs. This never touches the
+# JSearch budget. Every slug below was verified live against the real
+# Greenhouse/Lever APIs. To add more: try
+#   https://boards-api.greenhouse.io/v1/boards/<slug>/jobs
+#   https://api.lever.co/v0/postings/<slug>?mode=json
+# A 404 means wrong slug or not on that ATS — just skip it, nothing breaks.
+# (Comeet is common among Israeli companies too, but its API needs a
+# per-company token you can only get from that company's careers-page
+# source — not a guessable slug — so it isn't included here yet.)
+ISRAELI_ATS_COMPANIES = [
+    {"name": "AppsFlyer", "ats_platform": "greenhouse", "ats_slug": "appsflyer"},
+    {"name": "JFrog", "ats_platform": "greenhouse", "ats_slug": "jfrog"},
+    {"name": "Forter", "ats_platform": "greenhouse", "ats_slug": "forter"},
+    {"name": "Cybereason", "ats_platform": "greenhouse", "ats_slug": "cybereason"},
+    {"name": "Orca Security", "ats_platform": "greenhouse", "ats_slug": "orcasecurity"},
+    {"name": "Axonius", "ats_platform": "greenhouse", "ats_slug": "axonius"},
+    {"name": "Yotpo", "ats_platform": "greenhouse", "ats_slug": "yotpo"},
+    {"name": "Melio", "ats_platform": "greenhouse", "ats_slug": "melio"},
+    {"name": "Riskified", "ats_platform": "greenhouse", "ats_slug": "riskified"},
+    {"name": "SimilarWeb", "ats_platform": "greenhouse", "ats_slug": "similarweb"},
+    {"name": "Lightricks", "ats_platform": "greenhouse", "ats_slug": "lightricks"},
+    {"name": "Gong", "ats_platform": "greenhouse", "ats_slug": "gongio"},
+    {"name": "Taboola", "ats_platform": "greenhouse", "ats_slug": "taboola"},
+    {"name": "Bringg", "ats_platform": "greenhouse", "ats_slug": "bringg"},
+    {"name": "Cato Networks", "ats_platform": "greenhouse", "ats_slug": "catonetworks"},
+    {"name": "Transmit Security", "ats_platform": "greenhouse", "ats_slug": "transmitsecurity"},
+    {"name": "Sisense", "ats_platform": "greenhouse", "ats_slug": "sisense"},
+    {"name": "Augury", "ats_platform": "greenhouse", "ats_slug": "augury"},
+    {"name": "Fireblocks", "ats_platform": "greenhouse", "ats_slug": "fireblocks"},
+    {"name": "Cymulate", "ats_platform": "greenhouse", "ats_slug": "cymulate"},
+    {"name": "WalkMe", "ats_platform": "lever", "ats_slug": "walkme"},
+]
+
 # ─── LinkedIn Connections (Priority A, free, manual export) ──────
 # Export from: LinkedIn → Settings & Privacy → Data privacy →
 # Get a copy of your data → Connections.

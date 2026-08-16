@@ -1,11 +1,19 @@
 """
 Module 1: Job Scraping / Trigger
-Discovers new job postings by keyword, searching ALL companies globally
-via JSearch (free tier on RapidAPI, indexes LinkedIn/Indeed/Glassdoor/etc
-through Google Jobs) — no pre-configured company list, no location filter.
+Discovers new job postings from multiple sources:
+  - JSearch (RapidAPI, free tier, capped/rate-limited — see usage_tracker;
+    searches ALL companies globally, no pre-configured list)
+  - Remotive, RemoteOK, Arbeitnow (free, unlimited, no API key required —
+    run every day regardless of the JSearch budget)
+  - A curated list of Israeli tech companies (config.ISRAELI_ATS_COMPANIES),
+    crawled directly via their own Greenhouse/Lever job-board APIs — also
+    free and unlimited, and independent of JSearch's location handling.
+All raw postings pass through the same keyword filter and dedup logic
+before an alert is ever generated.
 
 Seen jobs are persisted to seen_jobs.json so re-running the pipeline
-doesn't re-alert on the same posting across days. A small hardcoded mock
+doesn't re-alert on the same posting across days; entries older than
+SEEN_JOB_RETENTION_DAYS are pruned automatically. A small hardcoded mock
 job list is available via --mock for offline testing.
 """
 
@@ -15,7 +23,7 @@ import hashlib
 import json
 import logging
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Optional
 
 import requests
@@ -28,6 +36,10 @@ logger = logging.getLogger(__name__)
 JSEARCH_URL = "https://jsearch.p.rapidapi.com/search"
 JSEARCH_HOST = "jsearch.p.rapidapi.com"
 REQUEST_TIMEOUT = 15
+
+# How long a job uid is remembered before it's eligible to be re-alerted on.
+# Keeps seen_jobs.json from growing forever.
+SEEN_JOB_RETENTION_DAYS = 30
 
 
 @dataclass
@@ -63,7 +75,9 @@ class JobScraper:
     def __init__(self, keywords: list[str], use_mock: bool = False):
         self.keywords = keywords
         self.use_mock = use_mock
-        self._seen_uids: set[str] = self._load_seen_uids()
+        # uid -> ISO timestamp first seen. A dict (not a set) so stale
+        # entries can be pruned by age — see SEEN_JOB_RETENTION_DAYS.
+        self._seen_uids: dict[str, str] = self._load_seen_uids()
 
     # ── Public API ──────────────────────────────────────────────
 
@@ -72,12 +86,20 @@ class JobScraper:
         Fetch jobs (mock or real), filter by keyword, and return only
         previously-unseen postings. Newly-seen uids are persisted to disk.
         """
-        raw_jobs = self._fetch_mock_jobs() if self.use_mock else self._fetch_from_jsearch()
+        if self.use_mock:
+            raw_jobs = self._fetch_mock_jobs()
+        else:
+            raw_jobs = (
+                self._fetch_from_jsearch()
+                + self._fetch_from_free_sources()
+                + self._fetch_from_ats_companies()
+            )
         filtered = self._apply_filters(raw_jobs)
         new_jobs = [j for j in filtered if j.uid not in self._seen_uids]
 
+        now_iso = datetime.now().isoformat()
         for job in new_jobs:
-            self._seen_uids.add(job.uid)
+            self._seen_uids[job.uid] = now_iso
         if new_jobs:
             self._save_seen_uids(self._seen_uids)
 
@@ -177,6 +199,190 @@ class JobScraper:
             ))
         return jobs
 
+    # ── Free job boards (no key, no rate limit) ────────────────────
+    # Unlike JSearch these never touch usage_tracker — they're free and
+    # unlimited, so they run on every cycle regardless of budget. Each
+    # source is isolated: a failure in one never blocks the others or the
+    # rest of the pipeline.
+
+    def _fetch_from_free_sources(self) -> list[JobPosting]:
+        jobs: list[JobPosting] = []
+        for name, fetcher in (
+            ("Remotive", self._fetch_remotive),
+            ("RemoteOK", self._fetch_remoteok),
+            ("Arbeitnow", self._fetch_arbeitnow),
+        ):
+            try:
+                found = fetcher()
+                logger.info("%s: %d job(s) fetched", name, len(found))
+                jobs += found
+            except (requests.exceptions.RequestException, ValueError, KeyError, TypeError) as e:
+                logger.warning("%s fetch failed: %s", name, e)
+        return jobs
+
+    @staticmethod
+    def _fetch_remotive() -> list[JobPosting]:
+        """Remotive — free, no key. https://remotive.com/api/remote-jobs"""
+        resp = requests.get(
+            "https://remotive.com/api/remote-jobs",
+            params={"category": "software-dev", "limit": 100},
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return [
+            JobPosting(
+                title=item.get("title", "Unknown role"),
+                company=item.get("company_name", "Unknown company"),
+                location=item.get("candidate_required_location", "Anywhere") or "Anywhere",
+                url=item.get("url", ""),
+                description=item.get("description", "") or "",
+                posted_date=item.get("publication_date"),
+                source="remotive",
+            )
+            for item in data.get("jobs", [])
+        ]
+
+    @staticmethod
+    def _fetch_remoteok() -> list[JobPosting]:
+        """RemoteOK — free, no key. https://remoteok.com/api"""
+        resp = requests.get(
+            "https://remoteok.com/api",
+            headers={"User-Agent": "job-hunter/1.0"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        # The first element of the response is API metadata, not a job.
+        return [
+            JobPosting(
+                title=item.get("position", "Unknown role"),
+                company=item.get("company", "Unknown company"),
+                location=item.get("location", "Remote") or "Remote",
+                url=item.get("url") or f"https://remoteok.com/l/{item.get('id', '')}",
+                description=item.get("description", "") or "",
+                posted_date=item.get("date"),
+                source="remoteok",
+            )
+            for item in data[1:]
+        ]
+
+    @staticmethod
+    def _fetch_arbeitnow() -> list[JobPosting]:
+        """Arbeitnow — free, no key. https://arbeitnow.com/api"""
+        resp = requests.get(
+            "https://www.arbeitnow.com/api/job-board-api",
+            timeout=REQUEST_TIMEOUT,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        return [
+            JobPosting(
+                title=item.get("title", "Unknown role"),
+                company=item.get("company_name", "Unknown company"),
+                location=item.get("location", "Remote") or "Remote",
+                url=item.get("url", ""),
+                description=item.get("description", "") or "",
+                posted_date=str(item.get("created_at")) if item.get("created_at") else None,
+                source="arbeitnow",
+            )
+            for item in data.get("data", [])
+        ]
+
+    # ── Curated Israeli-company ATS crawl (free, no key, no limit) ──
+    # Hits companies' own public job-board APIs directly — the same
+    # endpoints their careers pages call — so there's no rate limit to
+    # track and it never touches the JSearch budget. See
+    # config.ISRAELI_ATS_COMPANIES for the company list and how to extend
+    # it. Each company is isolated: one 404/timeout never blocks the rest.
+
+    def _fetch_from_ats_companies(self) -> list[JobPosting]:
+        companies = getattr(config, "ISRAELI_ATS_COMPANIES", [])
+        if not companies:
+            return []
+
+        jobs: list[JobPosting] = []
+        for company in companies:
+            platform = company.get("ats_platform")
+            fetcher = {
+                "greenhouse": self._fetch_greenhouse,
+                "lever": self._fetch_lever,
+            }.get(platform)
+            if fetcher is None:
+                logger.warning(
+                    "Unknown ats_platform '%s' for %s — skipping.",
+                    platform, company.get("name"),
+                )
+                continue
+            try:
+                found = fetcher(company)
+                if found:
+                    logger.info("%s (%s): %d job(s) fetched", company["name"], platform, len(found))
+                jobs += found
+            except (requests.exceptions.RequestException, ValueError, KeyError, TypeError) as e:
+                logger.warning("%s (%s) fetch failed: %s", company.get("name"), platform, e)
+        return jobs
+
+    @staticmethod
+    def _fetch_greenhouse(company: dict) -> list[JobPosting]:
+        """Greenhouse — free public API, no auth. One company at a time."""
+        slug = company["ats_slug"]
+        resp = requests.get(
+            f"https://boards-api.greenhouse.io/v1/boards/{slug}/jobs",
+            params={"content": "true"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        if resp.status_code == 404:
+            return []  # wrong/stale slug — not a failure worth logging loudly
+        resp.raise_for_status()
+        data = resp.json()
+
+        jobs = []
+        for item in data.get("jobs", []):
+            location = item.get("location") or {}
+            location_name = location.get("name", "") if isinstance(location, dict) else str(location)
+            jobs.append(JobPosting(
+                title=item.get("title", "Unknown role"),
+                company=company["name"],
+                location=location_name or "Israel",
+                url=item.get("absolute_url", ""),
+                description=item.get("content", "") or "",
+                posted_date=item.get("updated_at"),
+                source=f"greenhouse:{slug}",
+            ))
+        return jobs
+
+    @staticmethod
+    def _fetch_lever(company: dict) -> list[JobPosting]:
+        """Lever — free public API, no auth. One company at a time."""
+        slug = company["ats_slug"]
+        resp = requests.get(
+            f"https://api.lever.co/v0/postings/{slug}",
+            params={"mode": "json"},
+            timeout=REQUEST_TIMEOUT,
+        )
+        if resp.status_code == 404:
+            return []  # wrong/stale slug — not a failure worth logging loudly
+        resp.raise_for_status()
+        data = resp.json()
+        if not isinstance(data, list):
+            return []
+
+        jobs = []
+        for item in data:
+            categories = item.get("categories") or {}
+            location = categories.get("location", "") if isinstance(categories, dict) else ""
+            jobs.append(JobPosting(
+                title=item.get("text", "Unknown role"),
+                company=company["name"],
+                location=location or "Israel",
+                url=item.get("hostedUrl", ""),
+                description=item.get("descriptionPlain") or item.get("description", "") or "",
+                posted_date=None,
+                source=f"lever:{slug}",
+            ))
+        return jobs
+
     # ── Mock / Offline Demo Data ──────────────────────────────────
 
     @staticmethod
@@ -234,23 +440,59 @@ class JobScraper:
         ]
 
     # ── seen_jobs.json persistence ─────────────────────────────────
+    # Stored as {uid: iso_timestamp_first_seen} so entries older than
+    # SEEN_JOB_RETENTION_DAYS can be pruned on load — otherwise the file
+    # would grow forever. Transparently migrates the old flat-list format
+    # (no timestamps) the first time it's loaded.
 
     @staticmethod
-    def _load_seen_uids() -> set[str]:
+    def _load_seen_uids() -> dict[str, str]:
         path = config.SEEN_JOBS_FILE
         if not path.exists():
-            return set()
+            return {}
         try:
             with open(path, "r", encoding="utf-8") as f:
-                return set(json.load(f))
+                data = json.load(f)
         except (json.JSONDecodeError, OSError) as e:
             logger.warning("Failed to load %s: %s — starting with an empty seen-jobs set.", path.name, e)
-            return set()
+            return {}
+
+        if isinstance(data, list):
+            # Legacy format: a flat list of uids with no timestamps.
+            # Treat every entry as "seen right now" so migrating doesn't
+            # silently lose them or prune them all in one go.
+            now_iso = datetime.now().isoformat()
+            seen = {uid: now_iso for uid in data}
+        elif isinstance(data, dict):
+            seen = data
+        else:
+            logger.warning("%s has an unrecognized format — starting with an empty seen-jobs set.", path.name)
+            return {}
+
+        cutoff = datetime.now() - timedelta(days=SEEN_JOB_RETENTION_DAYS)
+        pruned: dict[str, str] = {}
+        for uid, ts in seen.items():
+            try:
+                seen_at = datetime.fromisoformat(ts)
+            except (TypeError, ValueError):
+                # Malformed timestamp — treat as freshly seen rather than
+                # silently dropping the uid.
+                seen_at = datetime.now()
+            if seen_at >= cutoff:
+                pruned[uid] = seen_at.isoformat()
+
+        dropped = len(seen) - len(pruned)
+        if dropped:
+            logger.info(
+                "Pruned %d seen-job uid(s) older than %d days.",
+                dropped, SEEN_JOB_RETENTION_DAYS,
+            )
+        return pruned
 
     @staticmethod
-    def _save_seen_uids(uids: set[str]) -> None:
+    def _save_seen_uids(seen: dict[str, str]) -> None:
         try:
             with open(config.SEEN_JOBS_FILE, "w", encoding="utf-8") as f:
-                json.dump(sorted(uids), f, indent=2)
+                json.dump(seen, f, indent=2, sort_keys=True)
         except OSError as e:
             logger.warning("Failed to save %s: %s", config.SEEN_JOBS_FILE.name, e)

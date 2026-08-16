@@ -26,6 +26,7 @@ from __future__ import annotations
 import csv
 import logging
 import re
+import urllib.parse
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
@@ -73,7 +74,6 @@ class Contact:
     linkedin_url: str
     is_first_degree: bool = False
     university: str = ""
-    department: str = ""
     source: str = "linkedin_csv"
 
     @property
@@ -105,6 +105,26 @@ class Contact:
         return config.PRIORITY_LABELS[p.name]
 
 
+# ── Priority E: LinkedIn search fallback (no real contact found) ────
+# Generated only when Priority A-D come up completely empty for a
+# company. There's no name attached — just a LinkedIn people-search link
+# — so this intentionally never reaches modules.message_generator (there's
+# no first name to substitute). The human clicks through, picks a real
+# person from the results, and sends the message themselves.
+LINKEDIN_SEARCH_TITLES = [
+    {"title": "Engineering Manager", "label": "Engineering Manager", "category": "engineering"},
+    {"title": "Recruiter", "label": "Recruiter / HR", "category": "hr"},
+]
+
+
+@dataclass
+class SearchFallback:
+    """A LinkedIn people-search link, shown in place of a named contact."""
+    label: str
+    category: str  # "engineering" | "hr"
+    search_url: str
+
+
 class ContactFinder:
     """
     Finds and ranks contacts at a target company by merging:
@@ -119,11 +139,6 @@ class ContactFinder:
         # Set True after the first hard Apollo failure (e.g. plan doesn't
         # include API access) so we stop retrying a dead key mid-run.
         self._apollo_unavailable = False
-
-    def find_best_contact(self, company: str) -> Optional[Contact]:
-        """Convenience wrapper — returns the single top contact."""
-        top = self.find_top_contacts(company, n=1)
-        return top[0] if top else None
 
     def find_top_contacts(self, company: str, n: int = 3) -> list[Contact]:
         """
@@ -147,6 +162,27 @@ class ContactFinder:
             ", ".join(f"{c.name} (Pri {c.priority.name})" for c in top),
         )
         return top
+
+    def find_search_fallbacks(self, company: str) -> list[SearchFallback]:
+        """
+        Priority E — call this only when find_top_contacts() returned
+        nothing. Builds LinkedIn people-search URLs (pure string
+        templating, no API call, always succeeds) so the job still gets
+        alerted on instead of silently disappearing.
+        """
+        fallbacks = []
+        for entry in LINKEDIN_SEARCH_TITLES:
+            keywords = f"{company} {entry['title']}"
+            url = (
+                "https://www.linkedin.com/search/results/people/"
+                f"?keywords={urllib.parse.quote(keywords)}"
+            )
+            fallbacks.append(SearchFallback(
+                label=entry["label"],
+                category=entry["category"],
+                search_url=url,
+            ))
+        return fallbacks
 
     # ── Source Aggregation ───────────────────────────────────────
 
@@ -191,7 +227,6 @@ class ContactFinder:
                 linkedin_url=(row.get("URL") or "").strip(),
                 is_first_degree=True,  # the CSV only ever contains 1st-degree connections
                 university="",
-                department="",
                 source="linkedin_csv",
             ))
         return matches
@@ -333,7 +368,6 @@ class ContactFinder:
                 linkedin_url=linkedin_url,
                 is_first_degree=False,
                 university="",
-                department="",
                 source="apollo",
             ))
         return contacts

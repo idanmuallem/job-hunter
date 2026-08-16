@@ -14,7 +14,7 @@ from typing import Optional
 
 import config
 from modules.job_scraper import JobScraper, JobPosting
-from modules.contact_finder import ContactFinder, Contact
+from modules.contact_finder import ContactFinder, Contact, SearchFallback
 from modules.message_generator import MessageGenerator, GeneratedOutreach
 from modules.alerter import (
     AlertDispatcher,
@@ -23,6 +23,7 @@ from modules.alerter import (
     TelegramAlert,
     JobAlert,
     OutreachPackage,
+    SearchFallbackPackage,
 )
 
 logger = logging.getLogger(__name__)
@@ -37,12 +38,14 @@ class PipelineResult:
     job: JobPosting
     contacts: list[Contact] = field(default_factory=list)
     outreach_list: list[GeneratedOutreach] = field(default_factory=list)
+    search_fallbacks: list[SearchFallback] = field(default_factory=list)
     alert_results: dict[str, bool] = field(default_factory=dict)
     error: Optional[str] = None
 
     @property
     def success(self) -> bool:
-        return len(self.outreach_list) > 0 and any(self.alert_results.values())
+        has_content = len(self.outreach_list) > 0 or len(self.search_fallbacks) > 0
+        return has_content and any(self.alert_results.values())
 
 
 class JobHunterPipeline:
@@ -119,22 +122,38 @@ class JobHunterPipeline:
 
         # Step 2: Find top 3 contacts
         contacts = self.finder.find_top_contacts(job.company, n=CONTACTS_PER_JOB)
-        if not contacts:
-            result.error = f"No suitable contacts found at {job.company}"
-            logger.warning(result.error)
-            return result
         result.contacts = contacts
 
-        # Step 3: Generate a message for each contact
-        try:
-            outreach_list = self.generator.generate_batch(contacts, job)
-            result.outreach_list = outreach_list
-        except Exception as e:
-            result.error = f"Message generation failed: {e}"
-            logger.error(result.error)
+        outreach_list: list[GeneratedOutreach] = []
+        if contacts:
+            # Step 3: Generate a message for each real, named contact.
+            try:
+                outreach_list = self.generator.generate_batch(contacts, job)
+                result.outreach_list = outreach_list
+            except Exception as e:
+                result.error = f"Message generation failed: {e}"
+                logger.error(result.error)
+                return result
+        else:
+            # Priority E fallback: Priority A-D found nobody at this
+            # company. Rather than silently dropping the job, still alert
+            # on it with LinkedIn search links — there's no name to
+            # personalize a message with, so message_generator is never
+            # invoked for these; the human finds and messages someone
+            # themselves.
+            result.search_fallbacks = self.finder.find_search_fallbacks(job.company)
+            logger.info(
+                "No named contacts at %s — falling back to %d LinkedIn search link(s)",
+                job.company, len(result.search_fallbacks),
+            )
+
+        if not outreach_list and not result.search_fallbacks:
+            result.error = f"No suitable contacts or fallback found at {job.company}"
+            logger.warning(result.error)
             return result
 
-        # Step 4: Build a single alert with all contacts and send it
+        # Step 4: Build a single alert — named contacts and/or search
+        # fallbacks — and send it.
         packages = [
             OutreachPackage(
                 rank=i + 1,
@@ -147,6 +166,14 @@ class JobHunterPipeline:
             )
             for i, o in enumerate(outreach_list)
         ]
+        fallback_packages = [
+            SearchFallbackPackage(
+                label=fb.label,
+                category=fb.category,
+                search_url=fb.search_url,
+            )
+            for fb in result.search_fallbacks
+        ]
 
         alert = JobAlert(
             company=job.company,
@@ -154,6 +181,7 @@ class JobHunterPipeline:
             job_url=job.url,
             posted_date=job.posted_date,
             contacts=packages,
+            search_fallbacks=fallback_packages,
         )
         result.alert_results = self.alerter.dispatch(alert)
         return result
