@@ -16,8 +16,12 @@ company nationality), and dedup logic before an alert is ever generated.
 
 Seen jobs are persisted to seen_jobs.json so re-running the pipeline
 doesn't re-alert on the same posting across days; entries older than
-SEEN_JOB_RETENTION_DAYS are pruned automatically. A small hardcoded mock
-job list is available via --mock for offline testing.
+SEEN_JOB_RETENTION_DAYS are pruned automatically. Dedup is keyed on
+normalized company+title, not URL — the same real posting can reach
+this pipeline through multiple sources with different apply/tracking
+links, and would otherwise alert twice on one actual opening (see
+JobPosting.__post_init__). A small hardcoded mock job list is
+available via --mock for offline testing.
 """
 
 from __future__ import annotations
@@ -25,6 +29,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Optional
@@ -51,6 +56,22 @@ def _passes_title_filter(title: str) -> bool:
     config.EXCLUDED_TITLE_KEYWORDS."""
     title_lower = (title or "").lower()
     return not any(kw in title_lower for kw in config.EXCLUDED_TITLE_KEYWORDS)
+
+
+_COMPANY_SUFFIX_RE = re.compile(r"\s+(inc\.?|ltd\.?|llc\.?|corp\.?|co\.?|gmbh|s\.a\.|plc)$")
+
+
+def _normalize_for_dedup(text: str) -> str:
+    """Lowercase + collapse whitespace, so minor formatting differences
+    between sources (extra spaces, casing) don't produce different dedup
+    keys for what's actually the same posting."""
+    return " ".join((text or "").lower().split())
+
+
+def _normalize_company_for_dedup(company: str) -> str:
+    """Same as _normalize_for_dedup, plus stripping common company-name
+    suffixes (Inc/Ltd/etc.) that different sources add inconsistently."""
+    return _COMPANY_SUFFIX_RE.sub("", _normalize_for_dedup(company)).strip()
 
 
 def _is_israel_relevant(location: str) -> bool:
@@ -81,7 +102,15 @@ class JobPosting:
     uid: str = field(default="", init=False)
 
     def __post_init__(self):
-        raw = f"{self.company}|{self.title}|{self.url}"
+        # Deliberately excludes url: the same real posting can reach this
+        # pipeline through more than one source with a different apply/
+        # tracking link each time (e.g. a company's own Greenhouse listing
+        # vs. the identical job aggregated by JSearch from LinkedIn) —
+        # keying on url would treat those as two different jobs and alert
+        # on the same actual opening twice. company/title are normalized
+        # (case, whitespace, common suffixes) so formatting differences
+        # between sources don't do the same thing.
+        raw = f"{_normalize_company_for_dedup(self.company)}|{_normalize_for_dedup(self.title)}"
         self.uid = hashlib.sha256(raw.encode()).hexdigest()[:12]
 
     def matches_keywords(self, keywords: list[str]) -> bool:
@@ -121,7 +150,21 @@ class JobScraper:
                 + self._fetch_from_ats_companies()
             )
         filtered = self._apply_filters(raw_jobs)
-        new_jobs = [j for j in filtered if j.uid not in self._seen_uids]
+
+        # Drop duplicates within this batch too, not just against
+        # already-seen history — e.g. a company can genuinely post the
+        # same-titled role as two separate reqs (different job ids, same
+        # company+title), or the same posting can turn up via two
+        # different sources in one run. Keep the first occurrence.
+        deduped: list[JobPosting] = []
+        seen_this_batch: set[str] = set()
+        for job in filtered:
+            if job.uid in seen_this_batch:
+                continue
+            seen_this_batch.add(job.uid)
+            deduped.append(job)
+
+        new_jobs = [j for j in deduped if j.uid not in self._seen_uids]
 
         now_iso = datetime.now().isoformat()
         for job in new_jobs:
@@ -130,8 +173,8 @@ class JobScraper:
             self._save_seen_uids(self._seen_uids)
 
         logger.info(
-            "Scraper found %d raw → %d filtered → %d new jobs",
-            len(raw_jobs), len(filtered), len(new_jobs),
+            "Scraper found %d raw → %d filtered → %d deduped → %d new jobs",
+            len(raw_jobs), len(filtered), len(deduped), len(new_jobs),
         )
         return new_jobs
 
