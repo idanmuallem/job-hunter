@@ -36,7 +36,7 @@ from modules import usage_tracker
 
 logger = logging.getLogger(__name__)
 
-JSEARCH_URL = "https://jsearch.p.rapidapi.com/search"
+JSEARCH_URL = "https://jsearch.p.rapidapi.com/search-v2"
 JSEARCH_HOST = "jsearch.p.rapidapi.com"
 REQUEST_TIMEOUT = 15
 
@@ -192,6 +192,9 @@ class JobScraper:
             "query": keyword,
             "date_posted": "3days",  # fresh postings only, avoids re-alerting on stale ones
             "num_pages": "1",
+            "country": "il",  # JSearch defaults to "us" when omitted — scope to Israel server-side
+            "job_requirements": "under_3_years_experience,no_experience,no_degree",  # junior/mid only, server-side
+            "employment_types": "FULLTIME",
         }
         try:
             resp = requests.get(JSEARCH_URL, headers=headers, params=params, timeout=REQUEST_TIMEOUT)
@@ -210,7 +213,9 @@ class JobScraper:
             return []
 
         jobs = []
-        for item in data.get("data", []):
+        # /search-v2 nests results at data.jobs (a v1-era plain list under
+        # "data" is no longer what this endpoint returns).
+        for item in (data.get("data") or {}).get("jobs", []):
             location_parts = [p for p in (item.get("job_city"), item.get("job_country")) if p]
             if location_parts:
                 location = ", ".join(location_parts)
