@@ -39,7 +39,24 @@ jobs:
         # was observed collapsing to a single line somewhere in the
         # browser-paste -> GitHub-secret-storage -> Actions-substitution
         # chain; a single-line base64 blob has no newlines to lose.
-        run: echo "${{ secrets.CONFIG_PY_B64 }}" | base64 -d > config.py
+        #
+        # Reads the secret via env: (assigns it to a shell variable)
+        # rather than interpolating ${{ }} directly into the script body
+        # — this is GitHub's own recommended pattern for using a secret
+        # inside a run: step, and prints its length (safe — reveals
+        # nothing about content, and isn't the literal secret so Actions'
+        # log-masking has nothing to redact) so a genuinely empty/unset
+        # secret fails immediately with a clear reason instead of
+        # silently producing an empty config.py.
+        env:
+          CONFIG_PY_B64: ${{ secrets.CONFIG_PY_B64 }}
+        run: |
+          echo "CONFIG_PY_B64 secret length: ${#CONFIG_PY_B64} chars"
+          if [ -z "$CONFIG_PY_B64" ]; then
+            echo "::error::CONFIG_PY_B64 secret is empty or not set. Add it under repo Settings -> Secrets and variables -> Actions -> 'Secrets' tab -> New repository secret (NOT under Environments), name exactly CONFIG_PY_B64."
+            exit 1
+          fi
+          echo "$CONFIG_PY_B64" | base64 -d > config.py
 
       - name: Verify config.py is complete
         # Fails fast with a clear, actionable message instead of letting
