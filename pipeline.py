@@ -73,7 +73,7 @@ class JobHunterPipeline:
         self.generator = MessageGenerator()
 
         # Module 4: Alert Dispatcher
-        channels = [ConsoleAlert(), JsonLogAlert()]
+        channels = [ConsoleAlert(), JsonLogAlert(path=str(config.OUTREACH_LOG_FILE))]
         if use_telegram:
             if config.TELEGRAM_BOT_TOKEN and config.TELEGRAM_CHAT_ID:
                 channels.insert(0, TelegramAlert())

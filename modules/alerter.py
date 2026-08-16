@@ -233,7 +233,7 @@ class AlertDispatcher:
     """Dispatches job alerts to one or more channels."""
 
     def __init__(self, channels: list[AlertChannel] | None = None):
-        self.channels = channels or [ConsoleAlert(), JsonLogAlert()]
+        self.channels = channels or [ConsoleAlert(), JsonLogAlert(path=str(config.OUTREACH_LOG_FILE))]
 
     def dispatch(self, alert: JobAlert) -> dict[str, bool]:
         results: dict[str, bool] = {}

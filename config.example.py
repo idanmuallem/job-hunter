@@ -158,8 +158,14 @@ RAPIDAPI_KEY = os.getenv("RAPIDAPI_KEY", "")
 APOLLO_API_KEY = os.getenv("APOLLO_API_KEY", "")
 
 # ─── Local persistence ────────────────────────────────────────────
-SEEN_JOBS_FILE = BASE_DIR / "seen_jobs.json"
-API_USAGE_FILE = BASE_DIR / "api_usage.json"
+# Lives in state/ (tracked in git, unlike most local files) so a daily
+# GitHub Actions run — which starts from a fresh checkout every time —
+# can commit updates back and carry dedup/budget state across runs.
+STATE_DIR = BASE_DIR / "state"
+STATE_DIR.mkdir(parents=True, exist_ok=True)  # self-healing if ever missing
+SEEN_JOBS_FILE = STATE_DIR / "seen_jobs.json"
+API_USAGE_FILE = STATE_DIR / "api_usage.json"
+OUTREACH_LOG_FILE = STATE_DIR / "outreach_log.jsonl"
 
 # ─── Contact Discovery ───────────────────────────────────────────
 # Title substrings used to classify Apollo results into Priority C/D

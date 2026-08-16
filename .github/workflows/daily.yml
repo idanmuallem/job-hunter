@@ -1,0 +1,59 @@
+name: Daily Job Hunter Run
+
+# Cron is always UTC. 05:00 UTC = 08:00 Israel time during IDT (summer,
+# UTC+3, roughly Mar-Oct) and 07:00 during IST (winter, UTC+2) — GitHub
+# Actions cron doesn't support timezones, so this drifts by an hour twice
+# a year around the clock-change dates. Adjust the minute/hour below if
+# you want to re-tune it after a DST switch.
+"on":
+  schedule:
+    - cron: "0 5 * * *"
+  workflow_dispatch: {}  # lets you trigger a run manually from the Actions tab
+
+permissions:
+  contents: write  # needed to commit updated state/ back to the repo
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write config.py from secret
+        # config.py is git-ignored (holds profile info alongside settings)
+        # so it doesn't exist on a fresh checkout — reconstruct it from a
+        # repo secret instead. The secret is the literal file content;
+        # it does NOT itself contain API keys/tokens (those are loaded
+        # separately via os.getenv() below, same as the local .env setup).
+        run: |
+          cat > config.py << 'JOB_HUNTER_CONFIG_EOF'
+          ${{ secrets.CONFIG_PY }}
+          JOB_HUNTER_CONFIG_EOF
+
+      - name: Run pipeline
+        env:
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          RAPIDAPI_KEY: ${{ secrets.RAPIDAPI_KEY }}
+          APOLLO_API_KEY: ${{ secrets.APOLLO_API_KEY }}
+        run: python main.py --telegram
+
+      - name: Commit updated state
+        # state/ holds seen_jobs.json / api_usage.json / outreach_log.jsonl
+        # — this run's dedup + API-budget progress needs to survive to
+        # tomorrow's run, which starts from a completely fresh checkout.
+        run: |
+          git config user.name "job-hunter-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add state/
+          git diff --cached --quiet || git commit -m "Update state [skip ci]"
+          git push

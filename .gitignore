@@ -14,10 +14,12 @@ config.py
 known_connections.json
 Connections.csv
 
-# Runtime-generated data
-outreach_log.jsonl
-seen_jobs.json
-api_usage.json
+# NOTE: seen_jobs.json / api_usage.json / outreach_log.jsonl are NOT
+# git-ignored — they live under state/ and ARE tracked on purpose: the
+# daily GitHub Actions run commits updates there so dedup/budget state
+# survives across runs even though each run starts from a fresh checkout.
+
+logs/
 
 # Scratch / working files (e.g. artifact report sources) — not part of the repo
 .scratch/
