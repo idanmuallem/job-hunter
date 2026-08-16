@@ -39,6 +39,23 @@ jobs:
           ${{ secrets.CONFIG_PY }}
           JOB_HUNTER_CONFIG_EOF
 
+      - name: Verify config.py is complete
+        # Fails fast with a clear, actionable message instead of letting
+        # main.py hit a confusing AttributeError deep in its own traceback
+        # — that's exactly what a truncated/stale CONFIG_PY secret paste
+        # looks like. Also prints the reconstructed line count so a
+        # truncation is visible at a glance without waiting for a full
+        # pipeline run to fail.
+        run: |
+          lines=$(wc -l < config.py)
+          echo "config.py reconstructed: $lines lines"
+          if ! grep -q "^def check_keys" config.py; then
+            echo "::error::config.py is missing check_keys() — the CONFIG_PY secret looks truncated or stale. Re-copy the FULL current config.py content into the CONFIG_PY secret (repo Settings -> Secrets and variables -> Actions -> CONFIG_PY -> Update) and re-run."
+            exit 1
+          fi
+          python -c "import ast; ast.parse(open('config.py', encoding='utf-8').read())" || { echo "::error::config.py is not valid Python — the CONFIG_PY secret content is corrupted."; exit 1; }
+          echo "config.py looks complete."
+
       - name: Run pipeline
         env:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
