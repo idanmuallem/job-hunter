@@ -31,13 +31,15 @@ jobs:
       - name: Write config.py from secret
         # config.py is git-ignored (holds profile info alongside settings)
         # so it doesn't exist on a fresh checkout — reconstruct it from a
-        # repo secret instead. The secret is the literal file content;
-        # it does NOT itself contain API keys/tokens (those are loaded
-        # separately via os.getenv() below, same as the local .env setup).
-        run: |
-          cat > config.py << 'JOB_HUNTER_CONFIG_EOF'
-          ${{ secrets.CONFIG_PY }}
-          JOB_HUNTER_CONFIG_EOF
+        # repo secret instead. The secret is base64 of the literal file
+        # content (does NOT itself contain API keys/tokens — those are
+        # loaded separately via os.getenv() below, same as local .env).
+        # Base64 deliberately avoids embedding real newlines in the
+        # secret's stored value — a plain multi-line paste of config.py
+        # was observed collapsing to a single line somewhere in the
+        # browser-paste -> GitHub-secret-storage -> Actions-substitution
+        # chain; a single-line base64 blob has no newlines to lose.
+        run: echo "${{ secrets.CONFIG_PY_B64 }}" | base64 -d > config.py
 
       - name: Verify config.py is complete
         # Fails fast with a clear, actionable message instead of letting
@@ -50,7 +52,7 @@ jobs:
           lines=$(wc -l < config.py)
           echo "config.py reconstructed: $lines lines"
           if ! grep -q "^def check_keys" config.py; then
-            echo "::error::config.py is missing check_keys() — the CONFIG_PY secret looks truncated or stale. Re-copy the FULL current config.py content into the CONFIG_PY secret (repo Settings -> Secrets and variables -> Actions -> CONFIG_PY -> Update) and re-run."
+            echo "::error::config.py is missing check_keys() — the CONFIG_PY_B64 secret looks truncated or stale. Re-generate it (see .github/workflows/daily.yml comments) and update the CONFIG_PY_B64 secret (repo Settings -> Secrets and variables -> Actions), then re-run."
             exit 1
           fi
           python -c "import ast; ast.parse(open('config.py', encoding='utf-8').read())" || { echo "::error::config.py is not valid Python — the CONFIG_PY secret content is corrupted."; exit 1; }
