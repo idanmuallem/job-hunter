@@ -143,6 +143,10 @@ ISRAELI_ATS_COMPANIES = [
     {"name": "Via", "ats_platform": "greenhouse", "ats_slug": "via"},
     {"name": "Innovid", "ats_platform": "greenhouse", "ats_slug": "innovid"},
     {"name": "Connecteam", "ats_platform": "greenhouse", "ats_slug": "connecteam"},
+    {"name": "Duda", "ats_platform": "greenhouse", "ats_slug": "duda"},
+    {"name": "NICE", "ats_platform": "greenhouse", "ats_slug": "nice"},
+    {"name": "MyHeritage", "ats_platform": "greenhouse", "ats_slug": "myheritage"},
+    {"name": "Sweet Security", "ats_platform": "greenhouse", "ats_slug": "sweetsecurity"},
 
     # Global companies with real Israel R&D/offices — global board pulled
     # in full, filtered down to Israel/open-remote postings downstream.
@@ -153,6 +157,8 @@ ISRAELI_ATS_COMPANIES = [
     {"name": "Cloudflare", "ats_platform": "greenhouse", "ats_slug": "cloudflare"},
     {"name": "GitLab", "ats_platform": "greenhouse", "ats_slug": "gitlab"},
     {"name": "Scopely", "ats_platform": "greenhouse", "ats_slug": "scopely"},
+    {"name": "Speechify", "ats_platform": "greenhouse", "ats_slug": "speechify"},
+    {"name": "Veeva Systems", "ats_platform": "lever", "ats_slug": "veeva"},
 ]
 
 # ─── Contact Discovery ───────────────────────────────────────────
