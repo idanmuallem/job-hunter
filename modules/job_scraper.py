@@ -8,8 +8,11 @@ Discovers new job postings from multiple sources:
   - A curated list of Israeli tech companies (config.ISRAELI_ATS_COMPANIES),
     crawled directly via their own Greenhouse/Lever job-board APIs — also
     free and unlimited, and independent of JSearch's location handling.
-All raw postings pass through the same keyword filter and dedup logic
-before an alert is ever generated.
+All raw postings pass through the same keyword filter, a title filter
+(rejects irrelevant categories — QA, DevOps/SRE, support, sales, etc. —
+and anything above mid-level seniority; see _passes_title_filter), an
+Israel-location filter (see _is_israel_relevant — position location, not
+company nationality), and dedup logic before an alert is ever generated.
 
 Seen jobs are persisted to seen_jobs.json so re-running the pipeline
 doesn't re-alert on the same posting across days; entries older than
@@ -40,6 +43,29 @@ REQUEST_TIMEOUT = 15
 # How long a job uid is remembered before it's eligible to be re-alerted on.
 # Keeps seen_jobs.json from growing forever.
 SEEN_JOB_RETENTION_DAYS = 30
+
+
+def _passes_title_filter(title: str) -> bool:
+    """False if the title names a role/seniority the user isn't targeting
+    (QA, DevOps/SRE, support, sales, senior+, etc.) — see
+    config.EXCLUDED_TITLE_KEYWORDS."""
+    title_lower = (title or "").lower()
+    return not any(kw in title_lower for kw in config.EXCLUDED_TITLE_KEYWORDS)
+
+
+def _is_israel_relevant(location: str) -> bool:
+    """
+    True if the POSITION (not the company) is Israel-relevant: the
+    location text explicitly names Israel, or it's a generic/open remote
+    listing with no other region restriction. See config.py for the
+    keyword lists and the "loose" matching rationale.
+    """
+    loc = (location or "").lower()
+    if any(kw in loc for kw in config.ISRAEL_LOCATION_KEYWORDS):
+        return True
+    if any(kw in loc for kw in config.REMOTE_RESTRICTION_KEYWORDS):
+        return False
+    return any(kw in loc for kw in config.REMOTE_OPEN_KEYWORDS)
 
 
 @dataclass
@@ -112,7 +138,12 @@ class JobScraper:
     # ── Filters ─────────────────────────────────────────────────
 
     def _apply_filters(self, jobs: list[JobPosting]) -> list[JobPosting]:
-        return [j for j in jobs if j.matches_keywords(self.keywords)]
+        return [
+            j for j in jobs
+            if j.matches_keywords(self.keywords)
+            and _is_israel_relevant(j.location)
+            and _passes_title_filter(j.title)
+        ]
 
     # ── Keyword Rotation (stay under JSearch's 200 req/month) ────
 

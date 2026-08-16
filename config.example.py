@@ -30,13 +30,85 @@ PROFILE = {
 
 # ─── Job Search Keywords ────────────────────────────────────────
 # Searched across ALL companies globally via JSearch — no pre-configured
-# company list and no location filtering (all locations are relevant).
+# company list (location filtering is handled separately, below).
 JOB_KEYWORDS = [
     "Software Developer",
     "Backend Developer",
     "Data Engineer",
     "Python Developer",
     "Cloud Engineer",
+]
+
+# ─── Title filter ──────────────────────────────────────────────────
+# Applied to the job TITLE only (not description — description text is
+# too noisy, e.g. "reports to the Engineering Lead" in an otherwise-
+# junior posting). A job is rejected if its title contains any keyword
+# below. Checked by job_scraper._passes_title_filter().
+EXCLUDED_TITLE_KEYWORDS = [
+    # QA / Testing
+    "qa", "quality assurance", "test engineer", "sdet",
+    "automation tester", "testing engineer",
+
+    # DevOps / SRE — deliberately does NOT include a bare "infrastructure"
+    # keyword, so "Platform Engineer" and "Systems Engineer" stay in scope.
+    "devops", "sre", "site reliability", "infrastructure engineer",
+
+    # Support / Solutions
+    "support engineer", "solutions engineer", "solutions architect",
+    "technical support",
+
+    # Sales / Pre-Sales
+    "sales engineer", "pre-sales", "customer success",
+
+    # Technical Writer / Scrum Master
+    "technical writer", "scrum master", "agile coach",
+
+    # Other non-dev roles that might slip through keyword matching.
+    # Only the specific phrases below — no bare "analyst", so "Data
+    # Engineer" stays in scope while "Data Analyst" doesn't. "hr " has a
+    # trailing space (matching the existing HR_TITLES convention above)
+    # so it doesn't false-positive on some unrelated word containing "hr".
+    "business analyst", "data analyst", "recruiter", "hr ",
+    "marketing", "product designer", "ui/ux designer",
+
+    # Seniority — junior + mid only, block everything above.
+    # "sr " (trailing space) and "sr." catch "Sr. Developer" / "Sr Dev"
+    # without catching "Israel" — the "sr" inside "israel" is always
+    # followed by "a", never a space or period.
+    "senior", "sr.", "sr ", "staff", "principal", "director",
+    "vp ", "vice president", "head of", "lead", "architect",
+    "chief", "cto", "cio",
+]
+
+# ─── Location filter: is the POSITION in Israel? ─────────────────
+# Applied to every source (JSearch, free job boards, and the Israeli ATS
+# crawl below) — company nationality doesn't guarantee the job itself is
+# based in Israel (e.g. Taboola/JFrog post plenty of US/EU roles too), so
+# this checks the job's own location text instead. "Loose" mode: a job
+# passes if its location explicitly names Israel, OR is generic/open
+# remote with no other region restriction. See
+# job_scraper._is_israel_relevant() for the matching logic.
+ISRAEL_LOCATION_KEYWORDS = [
+    "israel", "tel aviv", "tel-aviv", "jerusalem", "haifa", "herzliya",
+    "ramat gan", "petah tikva", "petach tikva", "beer sheva", "beersheba",
+    "rehovot", "netanya", "raanana", "ra'anana", "kfar saba", "yokneam",
+    "caesarea", "ashdod", "holon", "bnei brak", "modiin",
+    "rishon lezion", "rishon le zion",
+]
+# Generic/open remote signals — pass through when no restriction is found.
+REMOTE_OPEN_KEYWORDS = [
+    "remote", "anywhere", "worldwide", "global", "location independent",
+    "work from anywhere",
+]
+# If any of these appear, a "remote" listing is restricted to somewhere
+# that isn't Israel — reject even though it contains "remote".
+REMOTE_RESTRICTION_KEYWORDS = [
+    "us only", "usa only", "u.s. only", "us-only", "united states only",
+    "uk only", "u.k. only", "eu only", "europe only", "canada only",
+    "latam only", "apac only", "emea only", "na only", "north america only",
+    "must be located in the us", "must reside in the us",
+    "us based", "us-based", "us citizens", "us work authorization",
+    "no visa sponsorship",
 ]
 
 # ─── Israeli-company ATS crawl (free, unlimited — see job_scraper.py) ──
