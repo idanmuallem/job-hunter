@@ -224,12 +224,3 @@ class JobHunterPipeline:
                 "Pipeline stopped. Total jobs processed: %d",
                 self._processed_count,
             )
-
-    # ── Stats ───────────────────────────────────────────────────
-
-    @property
-    def stats(self) -> dict:
-        return {
-            "total_processed": self._processed_count,
-            "seen_jobs": len(self.scraper._seen_uids),
-        }

@@ -74,7 +74,6 @@ class Contact:
     linkedin_url: str
     is_first_degree: bool = False
     university: str = ""
-    source: str = "linkedin_csv"
 
     @property
     def priority(self) -> Priority:
@@ -227,7 +226,6 @@ class ContactFinder:
                 linkedin_url=(row.get("URL") or "").strip(),
                 is_first_degree=True,  # the CSV only ever contains 1st-degree connections
                 university="",
-                source="linkedin_csv",
             ))
         return matches
 
@@ -368,7 +366,6 @@ class ContactFinder:
                 linkedin_url=linkedin_url,
                 is_first_degree=False,
                 university="",
-                source="apollo",
             ))
         return contacts
 

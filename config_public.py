@@ -17,9 +17,11 @@ from __future__ import annotations
 JOB_KEYWORDS = [
     "Software Developer",
     "Backend Developer",
+    "Backend Engineer",
     "Data Engineer",
     "Python Developer",
     "Cloud Engineer",
+    "Platform Engineer",
 ]
 
 # ─── Title filter ──────────────────────────────────────────────────

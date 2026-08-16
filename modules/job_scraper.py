@@ -98,7 +98,6 @@ class JobPosting:
     url: str
     description: str = ""
     posted_date: Optional[str] = None
-    source: str = "mock"
     uid: str = field(default="", init=False)
 
     def __post_init__(self):
@@ -274,7 +273,6 @@ class JobScraper:
                 url=item.get("job_apply_link") or item.get("job_google_link") or "",
                 description=item.get("job_description", "") or "",
                 posted_date=item.get("job_posted_at_datetime_utc"),
-                source="jsearch",
             ))
         return jobs
 
@@ -317,7 +315,6 @@ class JobScraper:
                 url=item.get("url", ""),
                 description=item.get("description", "") or "",
                 posted_date=item.get("publication_date"),
-                source="remotive",
             )
             for item in data.get("jobs", [])
         ]
@@ -341,7 +338,6 @@ class JobScraper:
                 url=item.get("url") or f"https://remoteok.com/l/{item.get('id', '')}",
                 description=item.get("description", "") or "",
                 posted_date=item.get("date"),
-                source="remoteok",
             )
             for item in data[1:]
         ]
@@ -363,7 +359,6 @@ class JobScraper:
                 url=item.get("url", ""),
                 description=item.get("description", "") or "",
                 posted_date=str(item.get("created_at")) if item.get("created_at") else None,
-                source="arbeitnow",
             )
             for item in data.get("data", [])
         ]
@@ -427,7 +422,6 @@ class JobScraper:
                 url=item.get("absolute_url", ""),
                 description=item.get("content", "") or "",
                 posted_date=item.get("updated_at"),
-                source=f"greenhouse:{slug}",
             ))
         return jobs
 
@@ -458,7 +452,6 @@ class JobScraper:
                 url=item.get("hostedUrl", ""),
                 description=item.get("descriptionPlain") or item.get("description", "") or "",
                 posted_date=None,
-                source=f"lever:{slug}",
             ))
         return jobs
 
