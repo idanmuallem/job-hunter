@@ -94,7 +94,7 @@ REMOTE_RESTRICTION_KEYWORDS = [
     "no visa sponsorship",
 ]
 
-# ─── Israeli-company ATS crawl (free, unlimited — see job_scraper.py) ──
+# ─── ATS crawl (free, unlimited — see job_scraper.py) ──────────────
 # Hand-curated companies known to be on Greenhouse or Lever, crawled
 # directly via their own public job-board APIs. This never touches the
 # JSearch budget. Every slug below was verified live against the real
@@ -105,7 +105,15 @@ REMOTE_RESTRICTION_KEYWORDS = [
 # (Comeet is common among Israeli companies too, but its API needs a
 # per-company token you can only get from that company's careers-page
 # source — not a guessable slug — so it isn't included here yet.)
+#
+# NOT restricted to Israeli-founded companies — the position's location
+# matters, not the company's nationality (see _is_israel_relevant in
+# job_scraper.py, applied to every job from every company here). Several
+# entries below are global companies with real Israel R&D/offices; their
+# global job boards get pulled in full and then filtered down to just
+# Israel/open-remote postings downstream, same as everything else.
 ISRAELI_ATS_COMPANIES = [
+    # Israeli-founded
     {"name": "AppsFlyer", "ats_platform": "greenhouse", "ats_slug": "appsflyer"},
     {"name": "JFrog", "ats_platform": "greenhouse", "ats_slug": "jfrog"},
     {"name": "Forter", "ats_platform": "greenhouse", "ats_slug": "forter"},
@@ -127,6 +135,24 @@ ISRAELI_ATS_COMPANIES = [
     {"name": "Fireblocks", "ats_platform": "greenhouse", "ats_slug": "fireblocks"},
     {"name": "Cymulate", "ats_platform": "greenhouse", "ats_slug": "cymulate"},
     {"name": "WalkMe", "ats_platform": "lever", "ats_slug": "walkme"},
+    {"name": "Salt Security", "ats_platform": "greenhouse", "ats_slug": "saltsecurity"},
+    {"name": "Apiiro", "ats_platform": "greenhouse", "ats_slug": "apiiro"},
+    {"name": "Pagaya", "ats_platform": "greenhouse", "ats_slug": "pagaya"},
+    {"name": "Payoneer", "ats_platform": "greenhouse", "ats_slug": "payoneer"},
+    {"name": "Cloudinary", "ats_platform": "lever", "ats_slug": "cloudinary"},
+    {"name": "Via", "ats_platform": "greenhouse", "ats_slug": "via"},
+    {"name": "Innovid", "ats_platform": "greenhouse", "ats_slug": "innovid"},
+    {"name": "Connecteam", "ats_platform": "greenhouse", "ats_slug": "connecteam"},
+
+    # Global companies with real Israel R&D/offices — global board pulled
+    # in full, filtered down to Israel/open-remote postings downstream.
+    {"name": "Elastic", "ats_platform": "greenhouse", "ats_slug": "elastic"},
+    {"name": "MongoDB", "ats_platform": "greenhouse", "ats_slug": "mongodb"},
+    {"name": "Twilio", "ats_platform": "greenhouse", "ats_slug": "twilio"},
+    {"name": "Datadog", "ats_platform": "greenhouse", "ats_slug": "datadog"},
+    {"name": "Cloudflare", "ats_platform": "greenhouse", "ats_slug": "cloudflare"},
+    {"name": "GitLab", "ats_platform": "greenhouse", "ats_slug": "gitlab"},
+    {"name": "Scopely", "ats_platform": "greenhouse", "ats_slug": "scopely"},
 ]
 
 # ─── Contact Discovery ───────────────────────────────────────────
